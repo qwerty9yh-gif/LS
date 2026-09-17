@@ -1,0 +1,34 @@
+{
+  "records": [
+    {
+      "id": "f6541517-b75d-457c-8304-4f8aa2f6499d",
+      "date": "2026-09-17",
+      "shift": "morning",
+      "material": "",
+      "quantity": 0,
+      "laundryPersonnel": "",
+      "verifiedBy": "",
+      "status": "received",
+      "syncStatus": "pending",
+      "syncError": "Google Sheets is not configured on the server.",
+      "createdAt": "2026-09-17T19:54:25.254Z",
+      "updatedAt": "2026-09-17T19:54:25.313Z"
+    }
+  ],
+  "locks": [
+    {
+      "key": "2026-09-17:morning",
+      "date": "2026-09-17",
+      "shift": "morning",
+      "lockedAt": "2026-09-17T19:54:35.591Z",
+      "reason": "Shift closed"
+    }
+  ],
+  "syncEvents": [
+    {
+      "at": "2026-09-17T19:54:25.320Z",
+      "status": "pending",
+      "error": "Google Sheets is not configured on the server."
+    }
+  ]
+}
