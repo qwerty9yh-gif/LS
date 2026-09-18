@@ -10,7 +10,11 @@ const STATUS_LABELS = {
   dispatched: 'Dispatched'
 };
 
-const STORAGE_KEY = 'laundry-tracking-state-v1';
+const STORAGE_KEY = 'laundry-tracking-state-v2';
+// Single shared login account for all workers (no profiles, no registration).
+// A successful sign-in is remembered on this device; clearing site data or a
+// fresh install simply shows the sign-in screen again.
+const AUTH_KEY = 'laundry-auth-v1';
 // Backend origin, set by config.js. Empty string = same origin (the backend
 // serves the frontend itself); a URL = cross-origin PWA → backend API (CORS).
 const API_BASE = String(window.LAUNDRY_API_BASE || '').replace(/\/+$/, '');
@@ -302,8 +306,57 @@ function renderTotalsOnly() {
   if (el) el.textContent = String(recordsFor(state.selectedShift, state.selectedDate).reduce((sum, record) => sum + Number(record.quantity || 0), 0));
 }
 
+function isAuthenticated() {
+  return Boolean(localStorage.getItem(AUTH_KEY));
+}
+
+function renderLogin(root) {
+  root.innerHTML = `
+    <div class="login-screen">
+      <form class="login-card" id="login-form">
+        <div class="splash-mark">LT</div>
+        <h1>Laundry Tracking</h1>
+        <p class="login-hint">Sign in to continue</p>
+        <label class="login-label" for="login-email">Email</label>
+        <input id="login-email" type="email" autocomplete="username" required>
+        <label class="login-label" for="login-password">Password</label>
+        <input id="login-password" type="password" autocomplete="current-password" required>
+        <p class="login-error" id="login-error" hidden></p>
+        <button type="submit" class="login-btn">Sign In</button>
+      </form>
+    </div>
+  `;
+  const form = document.getElementById('login-form');
+  form.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const email = document.getElementById('login-email').value.trim();
+    const password = document.getElementById('login-password').value;
+    const button = form.querySelector('.login-btn');
+    const errorEl = document.getElementById('login-error');
+    button.disabled = true;
+    errorEl.hidden = true;
+    try {
+      const result = await api('api/auth/login', {
+        method: 'POST',
+        body: JSON.stringify({ email, password })
+      });
+      localStorage.setItem(AUTH_KEY, JSON.stringify({ email: result.user.email }));
+      render();
+      hydrateFromServer();
+    } catch (err) {
+      errorEl.textContent = err.message || 'Sign in failed.';
+      errorEl.hidden = false;
+      button.disabled = false;
+    }
+  });
+}
+
 function render() {
   const root = document.getElementById('app-shell');
+  if (!isAuthenticated()) {
+    renderLogin(root);
+    return;
+  }
   root.innerHTML = `
     <div class="app">
       <header class="topbar">

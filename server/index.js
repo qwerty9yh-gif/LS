@@ -7,6 +7,7 @@ import { existsSync } from 'node:fs';
 import pg from 'pg';
 import { google } from 'googleapis';
 import { setTimeout as delay } from 'node:timers/promises';
+import { verifyPassword } from './auth.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -447,6 +448,37 @@ function mergeRecords(localRecords, remoteRecords) {
 
   return Array.from(byId.values()).sort((a, b) => `${a.date}${a.shift}`.localeCompare(`${b.date}${b.shift}`));
 }
+
+// ─── Authentication: single universal account ────────────────────────────────
+// The whole application shares ONE seeded login account (server/seed-user.js).
+// No registration, no profiles, no password reset, no device/IP tracking.
+app.post('/api/auth/login', async (req, res) => {
+  const email = cleanText(req.body.email).toLowerCase();
+  const password = String(req.body.password || '');
+  if (!email || !password) {
+    res.status(400).json({ ok: false, error: 'Email and password are required.' });
+    return;
+  }
+  if (!hasDb()) {
+    res.status(503).json({ ok: false, error: 'Login requires PostgreSQL to be configured.' });
+    return;
+  }
+  try {
+    const result = await pool.query(
+      'SELECT id, email, password_hash FROM users WHERE email = $1 LIMIT 1',
+      [email]
+    );
+    const user = result.rows[0];
+    if (!user || !verifyPassword(password, user.password_hash)) {
+      res.status(401).json({ ok: false, error: 'Incorrect email or password.' });
+      return;
+    }
+    await pool.query('UPDATE users SET last_login_at = NOW() WHERE id = $1', [user.id]);
+    res.json({ ok: true, user: { email: user.email } });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: 'Sign in failed on the server.' });
+  }
+});
 
 app.get('/api/records', async (_req, res) => {
   const db = await readDb();

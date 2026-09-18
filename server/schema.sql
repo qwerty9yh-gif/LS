@@ -91,3 +91,21 @@ CREATE INDEX IF NOT EXISTS idx_sync_events_at ON sync_events (at DESC);
 -- a bulk upsert — making unrelated records look freshly edited and breaking
 -- last-write-wins merge logic. If an updated_at default is ever needed again,
 -- add it as an explicit per-query SET, not a blanket trigger.
+-- =========================================================================
+-- users table
+-- Single universal shared login account for all workers.
+-- No per-worker profiles, no roles, no registration: the application seeds
+-- exactly one account (see server/seed-user.js) and the login endpoint
+-- (POST /api/auth/login) authenticates against it.
+-- Passwords are stored as scrypt hashes (never plain text).
+-- =========================================================================
+CREATE TABLE IF NOT EXISTS users (
+    id            UUID             PRIMARY KEY DEFAULT uuid_generate_v4(),
+    email         TEXT             NOT NULL UNIQUE,
+    password_hash TEXT             NOT NULL,
+    created_at    TIMESTAMPTZ      NOT NULL DEFAULT NOW(),
+    updated_at    TIMESTAMPTZ      NOT NULL DEFAULT NOW(),
+    last_login_at TIMESTAMPTZ
+);
+
+CREATE INDEX IF NOT EXISTS idx_users_email ON users (email);

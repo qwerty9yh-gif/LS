@@ -48,6 +48,31 @@ node server/migrate.js
 This reads the JSON file and upserts all records, locks, and sync events into
 PostgreSQL, then reports counts for verification.
 
+### Database maintenance
+
+```powershell
+npm run db:clear    # deletes all records/locks/sync_events (schema kept)
+npm run seed:user   # seeds the single universal login account
+```
+
+## Login (single universal account)
+
+The whole application shares **one** login account for all workers. There is
+no registration, no password reset, no profiles and no device tracking — just
+an email, a password and a Sign In button.
+
+```powershell
+npm run seed:user   # defaults below; override via UNIVERSAL_EMAIL / UNIVERSAL_PASSWORD
+```
+
+- Email: `47year@gmail.com`
+- Password: `123456789`
+
+The password is stored as a **scrypt hash** in the `users` table (never plain
+text). The seed script deletes any other account, so the system always has
+exactly one. A successful sign-in is remembered on the device (`laundry-auth-v1`
+in localStorage); clearing site data shows the sign-in screen again.
+
 ## Google Sheets (optional export)
 
 Google Sheets sync remains as an **optional** export feature.  PostgreSQL is the
