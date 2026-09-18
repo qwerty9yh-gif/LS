@@ -315,8 +315,8 @@ function render() {
       </header>
       <main class="main">
         <nav class="tabs" aria-label="Main navigation">
-          <button class="tab ${state.tab === 'main' ? 'active' : ''}" data-tab="main">MAIN SHIFT TRACKING</button>
-          <button class="tab ${state.tab === 'tracking' ? 'active' : ''}" data-tab="tracking">COMPLETE TRACKING</button>
+          <button class="tab ${state.tab === 'main' ? 'active' : ''}" data-tab="main"><span class="tab-icon">01</span><span>Shifts</span></button>
+          <button class="tab ${state.tab === 'tracking' ? 'active' : ''}" data-tab="tracking"><span class="tab-icon">02</span><span>Tracking</span></button>
         </nav>
         ${state.notice ? `<p class="sync-note">${escapeHtml(state.notice)}</p>` : ''}
         ${state.tab === 'tracking' ? renderTracking() : renderMain()}
@@ -334,16 +334,53 @@ function installModeText() {
 function renderMain() {
   if (state.view === 'dates') return renderDates();
   if (state.view === 'sheet') return renderSheet();
+  const stats = dashboardStats();
   return `
+    <section class="dashboard-intro">
+      <div>
+        <p class="eyebrow">OPERATIONS OVERVIEW</p>
+        <h2>Good day, team.</h2>
+        <p class="subtle">Keep today's laundry flow moving.</p>
+      </div>
+      <div class="date-badge"><span>Today</span><strong>${formatDate(todayIso()).split(',')[0]}</strong></div>
+    </section>
+    <section class="dashboard-metrics" aria-label="Today's summary">
+      ${metric('Orders today', stats.orders)}
+      ${metric('Pending', stats.pending)}
+      ${metric('Ready', stats.ready)}
+      ${metric('Revenue', stats.revenue)}
+      ${metric('Units processed', stats.units)}
+    </section>
+    <section class="section-heading">
+      <div>
+        <p class="eyebrow">QUICK ACTIONS</p>
+        <h2>Open a shift</h2>
+      </div>
+      <span class="subtle">${stats.activeShifts} active</span>
+    </section>
     <section class="shift-grid">
       ${Object.entries(SHIFT_LABELS).map(([shift, label]) => `
         <button class="shift-card" data-shift="${shift}">
+          <span class="shift-icon">${shift === 'morning' ? 'AM' : shift === 'afternoon' ? 'PM' : 'N'}</span>
           <strong>${label}</strong>
           <span>${datesFor(shift).length} available date${datesFor(shift).length === 1 ? '' : 's'}</span>
+          <span class="shift-arrow" aria-hidden="true">&#8594;</span>
         </button>
       `).join('')}
     </section>
   `;
+}
+
+function dashboardStats() {
+  const todayRecords = state.records.filter((record) => record.date === todayIso());
+  return {
+    orders: todayRecords.length,
+    pending: todayRecords.filter((record) => record.status === 'pending').length,
+    ready: todayRecords.filter((record) => record.status === 'dispatched').length,
+    revenue: '--',
+    units: todayRecords.reduce((sum, record) => sum + Number(record.quantity || 0), 0),
+    activeShifts: new Set(todayRecords.map((record) => record.shift)).size
+  };
 }
 
 function renderDates() {
