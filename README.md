@@ -21,6 +21,9 @@ npm start
 
 Open `http://localhost:4173`.
 
+The frontend is deployed automatically to GitHub Pages on every push to `main`:
+https://qwerty9yh-gif.github.io/LS/
+
 ## Google Sheets
 
 Create a Google Cloud service account, share the target spreadsheet with the service account email, then set:
