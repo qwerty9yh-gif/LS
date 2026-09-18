@@ -57,7 +57,10 @@ function saveLocal() {
 }
 
 async function api(path, options = {}) {
-  const response = await fetch(API_BASE + path, {
+  // Join base + path safely: 'https://host' + 'api/...' must become
+  // 'https://host/api/...', and same-origin stays relative.
+  const url = API_BASE ? `${API_BASE}/${path.replace(/^\/+/, '')}` : path;
+  const response = await fetch(url, {
     headers: { 'Content-Type': 'application/json' },
     ...options
   });
@@ -334,6 +337,7 @@ function renderLogin(root) {
     const button = form.querySelector('.login-btn');
     const errorEl = document.getElementById('login-error');
     button.disabled = true;
+    button.textContent = 'Signing in...';
     errorEl.hidden = true;
     try {
       const result = await api('api/auth/login', {
@@ -344,8 +348,13 @@ function renderLogin(root) {
       render();
       hydrateFromServer();
     } catch (err) {
-      errorEl.textContent = err.message || 'Sign in failed.';
+      // Distinguish a sleeping/slow backend (Render free tier) from bad credentials.
+      const network = err instanceof TypeError || /failed to fetch|networkerror|load failed/i.test(err.message || '');
+      errorEl.textContent = network
+        ? 'Cannot reach the server right now. It may be starting up — please try again in a minute.'
+        : (err.message || 'Sign in failed.');
       errorEl.hidden = false;
+      button.textContent = 'Sign In';
       button.disabled = false;
     }
   });
