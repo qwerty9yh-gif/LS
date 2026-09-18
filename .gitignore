@@ -1,0 +1,7 @@
+.env
+data/
+node_modules/
+*.log
+ls-sheet-*.json
+tmp-playwright-check.mjs
+!package-lock.json

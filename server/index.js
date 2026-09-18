@@ -86,16 +86,27 @@ function lockKey(date, shift) {
 function isGoogleConfigured() {
   return Boolean(
     process.env.GOOGLE_SHEETS_SPREADSHEET_ID &&
-    process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL &&
-    process.env.GOOGLE_PRIVATE_KEY
+    (
+      process.env.GOOGLE_SERVICE_ACCOUNT_KEY_FILE ||
+      (process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL && process.env.GOOGLE_PRIVATE_KEY)
+    )
   );
 }
 
 async function getSheetsClient() {
-  const privateKey = process.env.GOOGLE_PRIVATE_KEY.replace(/\\n/g, '\n');
+  let credentials = {
+    client_email: process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL,
+    private_key: process.env.GOOGLE_PRIVATE_KEY?.replace(/\\n/g, '\n')
+  };
+
+  if (process.env.GOOGLE_SERVICE_ACCOUNT_KEY_FILE) {
+    const keyPath = path.resolve(rootDir, process.env.GOOGLE_SERVICE_ACCOUNT_KEY_FILE);
+    credentials = JSON.parse(await readFile(keyPath, 'utf8'));
+  }
+
   const auth = new google.auth.JWT({
-    email: process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL,
-    key: privateKey,
+    email: credentials.client_email,
+    key: credentials.private_key,
     scopes: ['https://www.googleapis.com/auth/spreadsheets']
   });
   await auth.authorize();
@@ -146,6 +157,35 @@ function recordToSheetRow(record) {
   ];
 }
 
+function sheetRowToRecord(row) {
+  const id = cleanText(row[0]);
+  if (!id) return null;
+
+  const date = cleanText(row[1]);
+  const shift = cleanText(row[2]).toLowerCase();
+  const status = cleanText(row[7] || 'received').toLowerCase();
+
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || !shifts.has(shift) || !statuses.has(status)) {
+    return null;
+  }
+
+  return {
+    id,
+    date,
+    shift,
+    material: cleanText(row[3]),
+    quantity: Number(row[4] || 0),
+    laundryPersonnel: cleanText(row[5]),
+    verifiedBy: cleanText(row[6]),
+    status,
+    syncStatus: 'synced',
+    syncError: '',
+    createdAt: row[8] || new Date().toISOString(),
+    updatedAt: row[9] || new Date().toISOString(),
+    syncedAt: new Date().toISOString()
+  };
+}
+
 async function syncRecordsToGoogle(records) {
   if (!records.length) return { synced: 0, skipped: 0 };
   if (!isGoogleConfigured()) {
@@ -183,6 +223,33 @@ async function syncRecordsToGoogle(records) {
   }
 
   return { synced: records.length, skipped: 0 };
+}
+
+async function pullRecordsFromGoogle() {
+  if (!isGoogleConfigured()) {
+    throw new Error('Google Sheets is not configured on the server.');
+  }
+
+  const spreadsheetId = process.env.GOOGLE_SHEETS_SPREADSHEET_ID;
+  const tab = process.env.GOOGLE_SHEETS_TAB || 'Records';
+  const sheets = await getSheetsClient();
+  await ensureSheetHeader(sheets);
+
+  const existing = await sheets.spreadsheets.values.get({ spreadsheetId, range: `${tab}!A2:J` });
+  return (existing.data.values || []).map(sheetRowToRecord).filter(Boolean);
+}
+
+function mergeRecords(localRecords, remoteRecords) {
+  const byId = new Map(localRecords.map((record) => [record.id, record]));
+
+  for (const remote of remoteRecords) {
+    const local = byId.get(remote.id);
+    if (!local || new Date(remote.updatedAt || 0) >= new Date(local.updatedAt || 0)) {
+      byId.set(remote.id, remote);
+    }
+  }
+
+  return Array.from(byId.values()).sort((a, b) => `${a.date}${a.shift}`.localeCompare(`${b.date}${b.shift}`));
 }
 
 app.get('/api/records', async (_req, res) => {
@@ -264,15 +331,32 @@ app.post('/api/sync/retry', async (_req, res) => {
   const pending = db.records.filter((record) => record.syncStatus !== 'synced');
   try {
     const result = await syncRecordsToGoogle(pending);
+    const remoteRecords = await pullRecordsFromGoogle();
     const syncedAt = new Date().toISOString();
-    db.records = db.records.map((record) => record.syncStatus !== 'synced'
+    const pushedRecords = db.records.map((record) => record.syncStatus !== 'synced'
       ? { ...record, syncStatus: 'synced', syncError: '', syncedAt }
       : record);
-    db.syncEvents.push({ at: syncedAt, status: 'synced', detail: result });
+    db.records = mergeRecords(pushedRecords, remoteRecords);
+    db.syncEvents.push({ at: syncedAt, status: 'synced', detail: { ...result, pulled: remoteRecords.length } });
     await writeDb(db);
-    res.json({ ok: true, sync: { status: 'synced', ...result }, records: db.records });
+    res.json({ ok: true, sync: { status: 'synced', ...result, pulled: remoteRecords.length }, records: db.records });
   } catch (error) {
     db.syncEvents.push({ at: new Date().toISOString(), status: 'pending', error: error.message });
+    await writeDb(db);
+    res.status(202).json({ ok: true, sync: { status: 'pending', error: error.message }, records: db.records });
+  }
+});
+
+app.post('/api/sync/pull', async (_req, res) => {
+  const db = await readDb();
+  try {
+    const remoteRecords = await pullRecordsFromGoogle();
+    db.records = mergeRecords(db.records, remoteRecords);
+    db.syncEvents.push({ at: new Date().toISOString(), status: 'pulled', detail: { pulled: remoteRecords.length } });
+    await writeDb(db);
+    res.json({ ok: true, sync: { status: 'pulled', pulled: remoteRecords.length }, records: db.records });
+  } catch (error) {
+    db.syncEvents.push({ at: new Date().toISOString(), status: 'pull-failed', error: error.message });
     await writeDb(db);
     res.status(202).json({ ok: true, sync: { status: 'pending', error: error.message }, records: db.records });
   }
