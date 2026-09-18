@@ -11,6 +11,9 @@ const STATUS_LABELS = {
 };
 
 const STORAGE_KEY = 'laundry-tracking-state-v1';
+// Backend origin, set by config.js. Empty string = same origin (the backend
+// serves the frontend itself); a URL = cross-origin PWA → backend API (CORS).
+const API_BASE = String(window.LAUNDRY_API_BASE || '').replace(/\/+$/, '');
 const todayIso = () => new Date().toISOString().slice(0, 10);
 const uid = () => crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
 
@@ -50,7 +53,7 @@ function saveLocal() {
 }
 
 async function api(path, options = {}) {
-  const response = await fetch(path, {
+  const response = await fetch(API_BASE + path, {
     headers: { 'Content-Type': 'application/json' },
     ...options
   });

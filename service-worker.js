@@ -1,6 +1,7 @@
-const CACHE_NAME = 'laundry-tracking-v2';
+const CACHE_NAME = 'laundry-tracking-v3';
 const APP_SHELL = [
   './',
+  './config.js',
   './index.html',
   './styles.css',
   './app.js',

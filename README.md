@@ -78,3 +78,21 @@ Open `http://localhost:4173`.
 
 The frontend is deployed automatically to GitHub Pages on every push to `main`:
 https://qwerty9yh-gif.github.io/LS/
+
+## Frontend ↔ backend (CORS)
+
+The hosted PWA frontend (GitHub Pages) talks to the backend API (Render) across
+origins. `config.js` defines the API base URL the frontend calls, and the
+backend whitelists allowed browser origins:
+
+```powershell
+ALLOWED_ORIGINS=https://qwerty9yh-gif.github.io,http://localhost:4173
+```
+
+- `ALLOWED_ORIGINS` is a comma-separated whitelist; if unset it defaults to the
+  Pages origin plus localhost. Set it to `*` to allow any origin (testing only).
+- Preflight `OPTIONS` requests are answered automatically.
+- The service worker never caches API calls, so offline behaviour is unchanged.
+- The Render free tier sleeps when idle; the first request after a cold start
+  can take up to ~1 minute. While the backend is waking up, the PWA shows its
+  existing offline notice and syncs once the server responds.

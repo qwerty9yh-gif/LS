@@ -20,6 +20,38 @@ const app = express();
 const port = Number(process.env.PORT || 4173);
 
 app.use(express.json({ limit: '1mb' }));
+
+// ─── CORS ────────────────────────────────────────────────────────────────────
+// The PWA frontend is served from GitHub Pages (a different origin than this
+// backend), so cross-origin API calls must be allowed. Origins are whitelisted
+// via ALLOWED_ORIGINS (comma-separated); '*' allows any origin. Same-origin
+// requests (frontend served by this backend) have no Origin header and are
+// unaffected.
+const allowedOrigins = new Set(
+  (process.env.ALLOWED_ORIGINS ||
+    'https://qwerty9yh-gif.github.io,http://localhost:4173,http://127.0.0.1:4173')
+    .split(',')
+    .map((item) => item.trim())
+    .filter(Boolean)
+);
+
+app.use((req, res, next) => {
+  const origin = req.headers.origin;
+  if (origin && (allowedOrigins.has('*') || allowedOrigins.has(origin))) {
+    res.setHeader('Access-Control-Allow-Origin', origin);
+    res.setHeader('Vary', 'Origin');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+    res.setHeader('Access-Control-Max-Age', '86400');
+  }
+  if (req.method === 'OPTIONS') {
+    // Preflight — must be answered without hitting the route handlers.
+    res.sendStatus(204);
+    return;
+  }
+  next();
+});
+
 app.use(express.static(publicDir, {
   extensions: ['html'],
   setHeaders(res, filePath) {
