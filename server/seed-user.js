@@ -18,7 +18,7 @@ import { hashPassword } from './auth.js';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const schemaPath = path.join(__dirname, 'schema.sql');
 
-const EMAIL = (process.env.UNIVERSAL_EMAIL || '47year@gmail.com').toLowerCase();
+const EMAIL = (process.env.UNIVERSAL_EMAIL || 'qwerty@gmail.com').toLowerCase();
 const PASSWORD = process.env.UNIVERSAL_PASSWORD || '123456789';
 
 const connectionString = process.env.DIRECT_URL || process.env.DATABASE_URL;

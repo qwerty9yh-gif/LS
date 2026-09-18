@@ -65,7 +65,7 @@ an email, a password and a Sign In button.
 npm run seed:user   # defaults below; override via UNIVERSAL_EMAIL / UNIVERSAL_PASSWORD
 ```
 
-- Email: `47year@gmail.com`
+- Email: `qwerty@gmail.com`
 - Password: `123456789`
 
 The password is stored as a **scrypt hash** in the `users` table (never plain
