@@ -5,12 +5,15 @@
   "type": "module",
   "scripts": {
     "start": "node server/index.js",
-    "test": "node --test tests/*.test.js"
+    "migrate": "node server/migrate.js",
+    "test": "node --test tests/*.test.js",
+    "db:drop-trigger": "node server/drop-trigger.js"
   },
   "dependencies": {
     "dotenv": "^16.4.5",
     "express": "^4.19.2",
-    "googleapis": "^140.0.1"
+    "googleapis": "^140.0.1",
+    "pg": "^8.23.0"
   },
   "devDependencies": {
     "playwright": "^1.47.2"

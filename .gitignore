@@ -2,6 +2,7 @@
 data/
 node_modules/
 *.log
+.history/
 ls-sheet-*.json
 tmp-playwright-check.mjs
 !package-lock.json
