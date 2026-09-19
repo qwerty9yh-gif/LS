@@ -64,7 +64,7 @@ input:focus, select:focus { border-color: var(--accent); outline: 2px solid rgba
 .verified-col { width: 15%; }
 
 .laundry-register th, .laundry-register td, .overall-table th, .overall-table td, .records-table th, .records-table td {
-  border: 1.5px solid #71827b;
+  border: 2px solid #4f625a;
   padding: 6px 8px;
   vertical-align: middle;
 }
