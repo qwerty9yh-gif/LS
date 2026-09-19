@@ -10,7 +10,14 @@ CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 DO $$
 BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'shift_type') THEN
-    CREATE TYPE shift_type AS ENUM ('morning', 'afternoon', 'night');
+    CREATE TYPE shift_type AS ENUM ('morning', 'afternoon', 'evening', 'night');
+  ELSIF NOT EXISTS (
+    SELECT 1
+    FROM pg_enum e
+    JOIN pg_type t ON t.oid = e.enumtypid
+    WHERE t.typname = 'shift_type' AND e.enumlabel = 'evening'
+  ) THEN
+    ALTER TYPE shift_type ADD VALUE 'evening' BEFORE 'night';
   END IF;
   IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'record_status') THEN
     CREATE TYPE record_status AS ENUM ('received', 'pending', 'dispatched');
@@ -33,9 +40,12 @@ CREATE TABLE IF NOT EXISTS records (
     date            DATE             NOT NULL,
     shift           shift_type       NOT NULL,
     material        TEXT             NOT NULL DEFAULT '',
-    quantity        INTEGER          NOT NULL DEFAULT 0 CHECK (quantity >= 0),
+    color           TEXT             NOT NULL DEFAULT '',
+    row_key         TEXT             NOT NULL DEFAULT '',
+    quantity        INTEGER          CHECK (quantity >= 0),
     laundry_personnel TEXT           NOT NULL DEFAULT '',
     verified_by     TEXT             NOT NULL DEFAULT '',
+    signature       TEXT             NOT NULL DEFAULT '',
     status          record_status    NOT NULL DEFAULT 'received',
     sync_status     sync_status      NOT NULL DEFAULT 'pending',
     sync_error      TEXT             NOT NULL DEFAULT '',
@@ -47,8 +57,14 @@ CREATE TABLE IF NOT EXISTS records (
 CREATE INDEX IF NOT EXISTS idx_records_date        ON records (date);
 CREATE INDEX IF NOT EXISTS idx_records_shift       ON records (shift);
 CREATE INDEX IF NOT EXISTS idx_records_date_shift  ON records (date, shift);
+CREATE INDEX IF NOT EXISTS idx_records_monthly     ON records (date, material, color);
 CREATE INDEX IF NOT EXISTS idx_records_sync_status ON records (sync_status);
 CREATE INDEX IF NOT EXISTS idx_records_status      ON records (status);
+
+ALTER TABLE records ADD COLUMN IF NOT EXISTS color TEXT NOT NULL DEFAULT '';
+ALTER TABLE records ADD COLUMN IF NOT EXISTS row_key TEXT NOT NULL DEFAULT '';
+ALTER TABLE records ADD COLUMN IF NOT EXISTS signature TEXT NOT NULL DEFAULT '';
+ALTER TABLE records ALTER COLUMN quantity DROP NOT NULL;
 
 -- =========================================================================
 -- locks table

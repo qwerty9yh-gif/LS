@@ -62,7 +62,7 @@ app.use(express.static(publicDir, {
   }
 }));
 
-const shifts = new Set(['morning', 'afternoon', 'night']);
+const shifts = new Set(['morning', 'afternoon', 'evening', 'night']);
 const statuses = new Set(['received', 'pending', 'dispatched']);
 const hasDb = () => Boolean(process.env.DATABASE_URL || process.env.DIRECT_URL);
 
@@ -116,9 +116,12 @@ function dbRecordToApi(row) {
     date: toDateOnly(row.date),
     shift: row.shift,
     material: row.material,
-    quantity: Number(row.quantity || 0),
+    color: row.color || '',
+    rowKey: row.row_key || '',
+    quantity: row.quantity === null || row.quantity === undefined ? null : Number(row.quantity),
     laundryPersonnel: row.laundry_personnel,
     verifiedBy: row.verified_by,
+    signature: row.signature || '',
     status: row.status,
     syncStatus: row.sync_status,
     syncError: row.sync_error,
@@ -147,7 +150,7 @@ async function readDb() {
   if (hasDb()) {
     await ensureSchema();
     const [recordsRes, locksRes, syncEventsRes] = await Promise.all([
-      pool.query('SELECT * FROM records ORDER BY date DESC, shift, material'),
+      pool.query('SELECT * FROM records ORDER BY date DESC, shift, material, row_key, color'),
       pool.query('SELECT * FROM locks ORDER BY locked_at DESC'),
       pool.query('SELECT * FROM sync_events ORDER BY at DESC LIMIT 200'),
     ]);
@@ -173,17 +176,19 @@ async function writeDb(db) {
       await tx.query('BEGIN');
       for (const rec of db.records) {
         await tx.query(
-          `INSERT INTO records (id, date, shift, material, quantity, laundry_personnel, verified_by, status, sync_status, sync_error, created_at, updated_at, synced_at)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+          `INSERT INTO records (id, date, shift, material, color, row_key, quantity, laundry_personnel, verified_by, signature, status, sync_status, sync_error, created_at, updated_at, synced_at)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
            ON CONFLICT (id) DO UPDATE SET
              date = EXCLUDED.date, shift = EXCLUDED.shift, material = EXCLUDED.material,
-             quantity = EXCLUDED.quantity, laundry_personnel = EXCLUDED.laundry_personnel,
-             verified_by = EXCLUDED.verified_by, status = EXCLUDED.status,
+             color = EXCLUDED.color, row_key = EXCLUDED.row_key, quantity = EXCLUDED.quantity,
+             laundry_personnel = EXCLUDED.laundry_personnel, verified_by = EXCLUDED.verified_by,
+             signature = EXCLUDED.signature, status = EXCLUDED.status,
              sync_status = EXCLUDED.sync_status, sync_error = EXCLUDED.sync_error,
              created_at = EXCLUDED.created_at, updated_at = EXCLUDED.updated_at,
              synced_at = EXCLUDED.synced_at`,
-          [rec.id, rec.date, rec.shift, rec.material || '', Number(rec.quantity || 0),
-           rec.laundryPersonnel || '', rec.verifiedBy || '', rec.status || 'received',
+          [rec.id, rec.date, rec.shift, rec.material || '', rec.color || '', rec.rowKey || '',
+           rec.quantity === '' || rec.quantity === null || rec.quantity === undefined ? null : Number(rec.quantity),
+           rec.laundryPersonnel || '', rec.verifiedBy || '', rec.signature || '', rec.status || 'received',
            rec.syncStatus || 'pending', rec.syncError || '', rec.createdAt, rec.updatedAt, rec.syncedAt || null]
         );
       }
@@ -247,26 +252,32 @@ function cleanText(value) {
 }
 
 function cleanRecord(input) {
-  const quantity = Number(input.quantity || 0);
   const id = cleanText(input.id);
   const date = cleanText(input.date);
   const shift = cleanText(input.shift).toLowerCase();
   const status = cleanText(input.status || 'received').toLowerCase();
+  const rawQuantity = input.quantity;
+  const quantity = rawQuantity === '' || rawQuantity === null || rawQuantity === undefined
+    ? null
+    : Number(rawQuantity);
 
   if (!id) throw new Error('Record id is required.');
   if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) throw new Error('A valid date is required.');
   if (!shifts.has(shift)) throw new Error('A valid shift is required.');
   if (!statuses.has(status)) throw new Error('A valid status is required.');
-  if (!Number.isFinite(quantity) || quantity < 0) throw new Error('Quantity must be a positive number.');
+  if (quantity !== null && (!Number.isFinite(quantity) || quantity < 0)) throw new Error('Quantity must be a positive number.');
 
   return {
     id,
     date,
     shift,
     material: cleanText(input.material),
+    color: cleanText(input.color),
+    rowKey: cleanText(input.rowKey),
     quantity,
     laundryPersonnel: cleanText(input.laundryPersonnel),
     verifiedBy: cleanText(input.verifiedBy),
+    signature: cleanText(input.signature),
     status,
     syncStatus: input.syncStatus || 'pending',
         syncError: input.syncError || '',
@@ -313,10 +324,10 @@ async function getSheetsClient() {
 async function ensureSheetHeader(sheets) {
   const spreadsheetId = process.env.GOOGLE_SHEETS_SPREADSHEET_ID;
   const tab = process.env.GOOGLE_SHEETS_TAB || 'Records';
-  const header = ['ID', 'DATE', 'SHIFT', 'MATERIAL', 'QUANTITY', 'LAUNDRY PERSONNEL', 'VERIFIED BY', 'STATUS', 'CREATED TIME', 'UPDATED TIME'];
+  const header = ['ID', 'DATE', 'SHIFT', 'MATERIAL', 'COLOR', 'QUANTITY', 'LAUNDRY PERSONNEL', 'VERIFIED BY', 'SIGNATURE', 'STATUS', 'CREATED TIME', 'UPDATED TIME'];
 
   try {
-    await sheets.spreadsheets.values.get({ spreadsheetId, range: `${tab}!A1:J1` });
+    await sheets.spreadsheets.values.get({ spreadsheetId, range: `${tab}!A1:L1` });
   } catch (error) {
     if (error.code === 400) {
       await sheets.spreadsheets.batchUpdate({
@@ -328,11 +339,11 @@ async function ensureSheetHeader(sheets) {
     }
   }
 
-  const existing = await sheets.spreadsheets.values.get({ spreadsheetId, range: `${tab}!A1:J1` });
+  const existing = await sheets.spreadsheets.values.get({ spreadsheetId, range: `${tab}!A1:L1` });
   if (!existing.data.values?.[0]?.length) {
     await sheets.spreadsheets.values.update({
       spreadsheetId,
-      range: `${tab}!A1:J1`,
+      range: `${tab}!A1:L1`,
       valueInputOption: 'RAW',
       requestBody: { values: [header] }
     });
@@ -345,9 +356,11 @@ function recordToSheetRow(record) {
     record.date,
     record.shift.toUpperCase(),
     record.material,
-    record.quantity,
+    record.color || '',
+    record.quantity ?? '',
     record.laundryPersonnel,
     record.verifiedBy,
+    record.signature || '',
     record.status.toUpperCase(),
     record.createdAt,
     record.updatedAt
@@ -360,7 +373,7 @@ function sheetRowToRecord(row) {
 
   const date = cleanText(row[1]);
   const shift = cleanText(row[2]).toLowerCase();
-  const status = cleanText(row[7] || 'received').toLowerCase();
+  const status = cleanText(row[9] || row[7] || 'received').toLowerCase();
 
   if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || !shifts.has(shift) || !statuses.has(status)) {
     return null;
@@ -371,9 +384,11 @@ function sheetRowToRecord(row) {
     date,
     shift,
     material: cleanText(row[3]),
-    quantity: Number(row[4] || 0),
-    laundryPersonnel: cleanText(row[5]),
-    verifiedBy: cleanText(row[6]),
+    color: cleanText(row[4]),
+    quantity: row[5] === '' || row[5] === undefined ? null : Number(row[5] || 0),
+    laundryPersonnel: cleanText(row[6]),
+    verifiedBy: cleanText(row[7]),
+    signature: cleanText(row[8]),
     status,
     syncStatus: 'synced',
     syncError: '',
@@ -394,7 +409,7 @@ async function syncRecordsToGoogle(records) {
   const sheets = await getSheetsClient();
   await ensureSheetHeader(sheets);
 
-  const existing = await sheets.spreadsheets.values.get({ spreadsheetId, range: `${tab}!A2:J` });
+  const existing = await sheets.spreadsheets.values.get({ spreadsheetId, range: `${tab}!A2:L` });
   const rows = existing.data.values || [];
   const rowById = new Map(rows.map((row, index) => [row[0], index + 2]));
 
@@ -404,14 +419,14 @@ async function syncRecordsToGoogle(records) {
     if (rowNumber) {
       await sheets.spreadsheets.values.update({
         spreadsheetId,
-        range: `${tab}!A${rowNumber}:J${rowNumber}`,
+        range: `${tab}!A${rowNumber}:L${rowNumber}`,
         valueInputOption: 'RAW',
         requestBody: { values }
       });
     } else {
       await sheets.spreadsheets.values.append({
         spreadsheetId,
-        range: `${tab}!A:J`,
+        range: `${tab}!A:L`,
         valueInputOption: 'RAW',
         insertDataOption: 'INSERT_ROWS',
         requestBody: { values }
@@ -432,7 +447,7 @@ async function pullRecordsFromGoogle() {
   const sheets = await getSheetsClient();
   await ensureSheetHeader(sheets);
 
-  const existing = await sheets.spreadsheets.values.get({ spreadsheetId, range: `${tab}!A2:J` });
+  const existing = await sheets.spreadsheets.values.get({ spreadsheetId, range: `${tab}!A2:L` });
   return (existing.data.values || []).map(sheetRowToRecord).filter(Boolean);
 }
 
@@ -497,15 +512,17 @@ app.put('/api/records', async (req, res) => {
       const now = new Date().toISOString();
       for (const record of cleaned) {
         await pool.query(
-          `INSERT INTO records (id, date, shift, material, quantity, laundry_personnel, verified_by, status, sync_status, sync_error, created_at, updated_at, synced_at)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'pending','',$9,$10,NULL)
+          `INSERT INTO records (id, date, shift, material, color, row_key, quantity, laundry_personnel, verified_by, signature, status, sync_status, sync_error, created_at, updated_at, synced_at)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'pending','',$12,$13,NULL)
            ON CONFLICT (id) DO UPDATE SET
              date = EXCLUDED.date, shift = EXCLUDED.shift, material = EXCLUDED.material,
-             quantity = EXCLUDED.quantity, laundry_personnel = EXCLUDED.laundry_personnel,
-             verified_by = EXCLUDED.verified_by, status = EXCLUDED.status,
+             color = EXCLUDED.color, row_key = EXCLUDED.row_key, quantity = EXCLUDED.quantity,
+             laundry_personnel = EXCLUDED.laundry_personnel, verified_by = EXCLUDED.verified_by,
+             signature = EXCLUDED.signature, status = EXCLUDED.status,
              sync_status = 'pending', sync_error = '', updated_at = EXCLUDED.updated_at`,
-          [record.id, record.date, record.shift, record.material || '', Number(record.quantity || 0),
-           record.laundryPersonnel || '', record.verifiedBy || '', record.status || 'received',
+          [record.id, record.date, record.shift, record.material || '', record.color || '', record.rowKey || '',
+           record.quantity === '' || record.quantity === null || record.quantity === undefined ? null : Number(record.quantity),
+           record.laundryPersonnel || '', record.verifiedBy || '', record.signature || '', record.status || 'received',
            record.createdAt || now, now]
         );
       }

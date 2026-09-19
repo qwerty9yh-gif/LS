@@ -60,15 +60,18 @@ async function main() {
     for (const rec of records) {
       const before = await client.query('SELECT id FROM records WHERE id = $1', [rec.id]);
       await client.query(
-        `INSERT INTO records (id, date, shift, material, quantity, laundry_personnel, verified_by, status, sync_status, sync_error, created_at, updated_at, synced_at)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+        `INSERT INTO records (id, date, shift, material, color, row_key, quantity, laundry_personnel, verified_by, signature, status, sync_status, sync_error, created_at, updated_at, synced_at)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
          ON CONFLICT (id) DO UPDATE SET
            date = EXCLUDED.date,
            shift = EXCLUDED.shift,
            material = EXCLUDED.material,
+           color = EXCLUDED.color,
+           row_key = EXCLUDED.row_key,
            quantity = EXCLUDED.quantity,
            laundry_personnel = EXCLUDED.laundry_personnel,
            verified_by = EXCLUDED.verified_by,
+           signature = EXCLUDED.signature,
            status = EXCLUDED.status,
            sync_status = EXCLUDED.sync_status,
            sync_error = EXCLUDED.sync_error,
@@ -80,9 +83,12 @@ async function main() {
           rec.date,
           rec.shift,
           rec.material || '',
-          Number(rec.quantity || 0),
+          rec.color || '',
+          rec.rowKey || '',
+          rec.quantity === '' || rec.quantity === null || rec.quantity === undefined ? null : Number(rec.quantity),
           rec.laundryPersonnel || '',
           rec.verifiedBy || '',
+          rec.signature || '',
           rec.status || 'received',
           rec.syncStatus || 'pending',
           rec.syncError || '',
