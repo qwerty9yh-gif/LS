@@ -1,4 +1,4 @@
-const CACHE_NAME = 'laundry-tracking-v4';
+const CACHE_NAME = 'laundry-tracking-v5-desktop-register';
 const APP_SHELL = [
   './',
   './config.js',
@@ -41,11 +41,18 @@ self.addEventListener('fetch', (event) => {
     return;
   }
 
+  const url = new URL(request.url);
+  const isAppAsset = ['/', '/index.html', '/app.js', '/styles.css', '/config.js', '/service-worker.js']
+    .some((path) => url.pathname.endsWith(path));
+
   event.respondWith(
-    caches.match(request).then((cached) => cached || fetch(request).then((response) => {
+    fetch(request).then((response) => {
       const copy = response.clone();
       caches.open(CACHE_NAME).then((cache) => cache.put(request, copy));
       return response;
-    }).catch(() => caches.match('./index.html')))
+    }).catch(() => {
+      if (isAppAsset) return caches.match(request).then((cached) => cached || caches.match('./index.html'));
+      return caches.match(request).then((cached) => cached || caches.match('./index.html'));
+    })
   );
 });
