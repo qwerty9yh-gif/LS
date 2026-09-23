@@ -46,7 +46,31 @@ h2 { font-size: 22px; line-height: 1.2; letter-spacing: 0.01em; }
 .sync-note { min-height: 22px; margin: 0 0 10px; color: var(--muted); font-size: 13px; }
 
 .register-toolbar, .page-head { display: flex; align-items: flex-end; justify-content: space-between; gap: 12px; margin: 0 0 12px; }
-.register-toolbar label { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 12px; font-weight: 800; text-transform: uppercase; }
+.register-toolbar label { display: inline-flex; align-items: center; gap: 8px; color: var(--muted); font-size: 12px; font-weight: 800; text-transform: uppercase; }
+.input-inline { display: contents; }
+.input-inline input, .input-inline label { display: inline-flex; }
+.form-toolbar { flex-wrap: wrap; }
+.form-toolbar-left, .form-toolbar-right { display: flex; align-items: flex-end; gap: 10px; flex-wrap: wrap; }
+.new-form-button { font-weight: 900; }
+.day-picker-label { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 12px; font-weight: 800; text-transform: uppercase; }
+.modal-overlay {
+  position: fixed; inset: 0; z-index: 1000;
+  display: grid; place-items: center;
+  background: rgba(16, 51, 47, 0.45);
+  padding: 16px;
+}
+.modal-card {
+  background: var(--surface); border: 1px solid var(--line-soft); border-radius: 12px;
+  padding: 26px 28px; max-width: 420px; width: 100%;
+  box-shadow: 0 22px 44px rgba(24, 51, 47, 0.18);
+}
+.modal-card h3 { font-size: 18px; margin-bottom: 6px; }
+.modal-card .subtle { margin: 0 0 14px; }
+.modal-label { display: block; color: var(--muted); font-size: 11px; font-weight: 800; text-transform: uppercase; margin-bottom: 6px; }
+.modal-label input { width: 100%; height: 42px; }
+.modal-actions { display: flex; gap: 10px; justify-content: flex-end; margin-top: 16px; }
+.archived-heading td { color: var(--muted); font-style: italic; }
+.archived-row td { color: var(--muted); font-style: italic; background: #fafbfb; }
 input, select { height: 36px; border: 1px solid var(--line-soft); border-radius: 7px; background: var(--surface); padding: 0 10px; color: var(--ink); box-shadow: inset 0 1px 2px rgba(24, 51, 47, 0.03); }
 input:focus, select:focus { border-color: var(--accent); outline: 2px solid rgba(31, 122, 109, 0.15); }
 
@@ -121,7 +145,7 @@ input:focus, select:focus { border-color: var(--accent); outline: 2px solid rgba
   @page { size: landscape; margin: 8mm; }
   html, body { min-width: 0; background: white; }
   .app { padding: 0; }
-  .no-print, .topbar, .tabs, .sync-note, .register-toolbar, .mini-button { display: none !important; }
+    .no-print, .topbar, .tabs, .sync-note, .register-toolbar, .form-toolbar, .mini-button, .modal-overlay { display: none !important; }
   .main, .print-area { width: 100%; margin: 0; padding: 0; border: 0; overflow: visible; }
   .register-title { margin-bottom: 5px; padding: 4px 6px; break-after: avoid; }
   .register-title h2 { font-size: 14px; }

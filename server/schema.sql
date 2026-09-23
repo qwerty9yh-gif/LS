@@ -83,6 +83,18 @@ CREATE TABLE IF NOT EXISTS locks (
 CREATE INDEX IF NOT EXISTS idx_locks_date_shift ON locks (date, shift);
 
 -- =========================================================================
+-- daily_forms table
+-- One row per calendar day that has an explicit Daily Register form.
+-- Individual laundry rows in "records" already carry their own date, so a
+-- form with zero entries is still tracked here (prevents duplicate forms
+-- for the same date and lets empty days appear in Daily Records).
+-- =========================================================================
+CREATE TABLE IF NOT EXISTS daily_forms (
+    date        DATE             PRIMARY KEY,
+    created_at  TIMESTAMPTZ      NOT NULL DEFAULT NOW()
+);
+
+-- =========================================================================
 -- sync_events table
 -- Replaces the JSON "syncEvents" array. Append-only log of sync attempts.
 -- =========================================================================
@@ -96,6 +108,14 @@ CREATE TABLE IF NOT EXISTS sync_events (
 
 CREATE INDEX IF NOT EXISTS idx_sync_events_at ON sync_events (at DESC);
 
+-- =========================================================================
+-- updated_at handling
+-- =========================================================================
+-- NOTE: the 'evening' enum value is retained as the stable storage key for
+-- "Shift 3 (Straight Day Shift)". Only the user-facing label changed, so no
+-- data migration is needed and existing rows, locks and cached clients keep
+-- working. The API additionally accepts 'straight' / 'straight_day' /
+-- 'straight day shift' aliases and normalizes them to 'evening'.
 -- =========================================================================
 -- updated_at handling
 -- =========================================================================

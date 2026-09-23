@@ -50,6 +50,7 @@ async function main() {
     const records = db.records || [];
     const locks = db.locks || [];
     const syncEvents = db.syncEvents || [];
+    const dailyForms = db.dailyForms || [];
 
     let migratedRecords = 0;
     let updatedRecords = 0;
@@ -119,6 +120,19 @@ async function main() {
       migratedLocks++;
     }
 
+    // 4b. Upsert daily forms (idempotent on re-runs)
+    let migratedForms = 0;
+    for (const form of dailyForms) {
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(String(form.date || ''))) continue;
+      await client.query(
+        `INSERT INTO daily_forms (date, created_at)
+         VALUES ($1,$2)
+         ON CONFLICT (date) DO NOTHING`,
+        [form.date, form.createdAt ? new Date(form.createdAt) : new Date()]
+      );
+      migratedForms++;
+    }
+
     // 5. Insert sync events (append-only, idempotent on re-runs)
     // Legacy JSON events have no unique key, so skip rows that already
     // exist with the same (at, status, error) to keep re-runs safe.
@@ -149,13 +163,15 @@ async function main() {
 
     console.log(`→ Records: ${migratedRecords} new, ${updatedRecords} updated (out of ${records.length} total)`);
     console.log(`→ Locks: ${migratedLocks} migrated`);
+    console.log(`→ Daily forms: ${migratedForms} migrated`);
     console.log(`→ Sync events: ${migratedSyncEvents} migrated`);
 
     // 6. Verify counts
     const recCount = await client.query('SELECT COUNT(*) FROM records');
     const lockCount = await client.query('SELECT COUNT(*) FROM locks');
+    const formCount = await client.query('SELECT COUNT(*) FROM daily_forms');
     const syncCount = await client.query('SELECT COUNT(*) FROM sync_events');
-    console.log(`✓ Verification: records=${recCount.rows[0].count}, locks=${lockCount.rows[0].count}, sync_events=${syncCount.rows[0].count}`);
+    console.log(`✓ Verification: records=${recCount.rows[0].count}, locks=${lockCount.rows[0].count}, daily_forms=${formCount.rows[0].count}, sync_events=${syncCount.rows[0].count}`);
     console.log('✓ Migration complete.');
   } catch (err) {
     console.error('✖ Migration failed:', err.message);

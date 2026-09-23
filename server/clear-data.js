@@ -2,7 +2,7 @@
  * Clears ALL application data (test/demo/seed records) from the database
  * while keeping the schema, tables, relationships and migrations intact.
  *
- * Clears: records, locks, sync_events. Keeps: users (login accounts).
+ * Clears: records, locks, sync_events, daily_forms. Keeps: users (login accounts).
  * Usage: npm run db:clear
  */
 import 'dotenv/config';
@@ -19,14 +19,14 @@ const client = await pool.connect();
 
 try {
   await client.query('BEGIN');
-  for (const table of ['records', 'locks', 'sync_events']) {
+  for (const table of ['records', 'locks', 'sync_events', 'daily_forms']) {
     const r = await client.query(`DELETE FROM ${table}`);
     console.log(`→ Cleared ${table}: ${r.rowCount} row(s) removed`);
   }
   await client.query('COMMIT');
 
   console.log('→ Verification after clearing:');
-  for (const table of ['records', 'locks', 'sync_events']) {
+  for (const table of ['records', 'locks', 'sync_events', 'daily_forms']) {
     const r = await client.query(`SELECT COUNT(*) AS c FROM ${table}`);
     console.log(`  ${table}=${r.rows[0].c}`);
   }

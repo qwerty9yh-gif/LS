@@ -8,6 +8,7 @@ import pg from 'pg';
 import { google } from 'googleapis';
 import { setTimeout as delay } from 'node:timers/promises';
 import { verifyPassword } from './auth.js';
+import { normalizeShift, formExists as formDateExists, isValidFormDate } from './forms.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -63,6 +64,8 @@ app.use(express.static(publicDir, {
 }));
 
 const shifts = new Set(['morning', 'afternoon', 'evening', 'night']);
+// Human-friendly labels stay in the frontend; Shift 3 is now presented as
+// "Shift 3 (Straight Day Shift)" while 'evening' remains the stored key.
 const statuses = new Set(['received', 'pending', 'dispatched']);
 const hasDb = () => Boolean(process.env.DATABASE_URL || process.env.DIRECT_URL);
 
@@ -149,23 +152,47 @@ function dbSyncEventToApi(row) {
 async function readDb() {
   if (hasDb()) {
     await ensureSchema();
-    const [recordsRes, locksRes, syncEventsRes] = await Promise.all([
+    const [recordsRes, locksRes, syncEventsRes, formsRes] = await Promise.all([
       pool.query('SELECT * FROM records ORDER BY date DESC, shift, material, row_key, color'),
       pool.query('SELECT * FROM locks ORDER BY locked_at DESC'),
       pool.query('SELECT * FROM sync_events ORDER BY at DESC LIMIT 200'),
+      pool.query('SELECT * FROM daily_forms ORDER BY date DESC').catch(() => ({ rows: [] })),
     ]);
-    return {
+    const db = {
       records: recordsRes.rows.map(dbRecordToApi),
       locks: locksRes.rows.map(dbLockToApi),
       syncEvents: syncEventsRes.rows.map(dbSyncEventToApi),
+      dailyForms: (formsRes.rows || []).map((row) => ({
+        date: toDateOnly(row.date),
+        createdAt: row.created_at,
+      })),
     };
+    // Seed dailyForms from record dates so pre-existing days are recognised
+    // as existing forms (prevents duplicates, feeds date navigation).
+    const seen = new Set(db.dailyForms.map((form) => form.date));
+    for (const record of db.records) {
+      if (record?.date && !seen.has(record.date)) {
+        seen.add(record.date);
+        db.dailyForms.push({ date: record.date, createdAt: record.createdAt || null });
+      }
+    }
+    return db;
   }
   // Fallback: legacy JSON file
   if (!existsSync(dataDir)) await mkdir(dataDir, { recursive: true });
   if (!existsSync(dbPath)) {
-    await writeFile(dbPath, JSON.stringify({ records: [], locks: [], syncEvents: [] }, null, 2));
+    await writeFile(dbPath, JSON.stringify({ records: [], locks: [], syncEvents: [], dailyForms: [] }, null, 2));
   }
-  return JSON.parse(await readFile(dbPath, 'utf8'));
+  const fallback = JSON.parse(await readFile(dbPath, 'utf8'));
+  fallback.dailyForms = Array.isArray(fallback.dailyForms) ? fallback.dailyForms : [];
+  const seenFallback = new Set(fallback.dailyForms.map((form) => form?.date).filter(Boolean));
+  for (const record of fallback.records || []) {
+    if (record?.date && !seenFallback.has(record.date)) {
+      seenFallback.add(record.date);
+      fallback.dailyForms.push({ date: record.date, createdAt: record.createdAt || null });
+    }
+  }
+  return fallback;
 }
 
 async function writeDb(db) {
@@ -233,6 +260,17 @@ async function writeDb(db) {
           [at, status, error, ev.detail ? JSON.stringify(ev.detail) : null]
         );
       }
+      // Persist explicit daily forms (empty days included) so duplicate
+      // detection and date navigation work server-side as well.
+      for (const form of db.dailyForms || []) {
+        if (!isValidFormDate(form?.date)) continue;
+        await tx.query(
+          `INSERT INTO daily_forms (date, created_at)
+           VALUES ($1,$2)
+           ON CONFLICT (date) DO NOTHING`,
+          [form.date, form.createdAt ? new Date(form.createdAt) : new Date()]
+        );
+      }
       await tx.query('COMMIT');
     } catch (err) {
       await tx.query('ROLLBACK');
@@ -254,7 +292,7 @@ function cleanText(value) {
 function cleanRecord(input) {
   const id = cleanText(input.id);
   const date = cleanText(input.date);
-  const shift = cleanText(input.shift).toLowerCase();
+  const shift = normalizeShift(input.shift);
   const status = cleanText(input.status || 'received').toLowerCase();
   const rawQuantity = input.quantity;
   const quantity = rawQuantity === '' || rawQuantity === null || rawQuantity === undefined
@@ -372,7 +410,7 @@ function sheetRowToRecord(row) {
   if (!id) return null;
 
   const date = cleanText(row[1]);
-  const shift = cleanText(row[2]).toLowerCase();
+  const shift = normalizeShift(row[2]);
   const status = cleanText(row[9] || row[7] || 'received').toLowerCase();
 
   if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || !shifts.has(shift) || !statuses.has(status)) {
@@ -525,6 +563,13 @@ app.put('/api/records', async (req, res) => {
            record.laundryPersonnel || '', record.verifiedBy || '', record.signature || '', record.status || 'received',
            record.createdAt || now, now]
         );
+        // Every edited day is an existing daily form (idempotent).
+        await pool.query(
+          `INSERT INTO daily_forms (date, created_at)
+           VALUES ($1,$2)
+           ON CONFLICT (date) DO NOTHING`,
+          [record.date, record.createdAt || now]
+        ).catch(() => {});
       }
     } else {
       const db = await readDb();
@@ -538,6 +583,9 @@ app.put('/api/records', async (req, res) => {
           syncStatus: 'pending',
           syncError: ''
         });
+        if (!formDateExists(db.dailyForms, [], record.date)) {
+          db.dailyForms = [...(db.dailyForms || []), { date: record.date, createdAt: record.createdAt || new Date().toISOString() }];
+        }
       }
       db.records = Array.from(byId.values()).sort((a, b) => `${a.date}${a.shift}`.localeCompare(`${b.date}${b.shift}`));
       await writeDb(db);
@@ -622,8 +670,8 @@ app.delete('/api/records/:id', async (req, res) => {
 
 app.post('/api/locks', async (req, res) => {
   const date = cleanText(req.body.date);
-  const shift = cleanText(req.body.shift).toLowerCase();
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || !shifts.has(shift)) {
+  const shift = normalizeShift(req.body.shift);
+  if (!isValidFormDate(date) || !shifts.has(shift)) {
     res.status(400).json({ ok: false, error: 'Valid date and shift are required.' });
     return;
   }
@@ -634,6 +682,52 @@ app.post('/api/locks', async (req, res) => {
     await writeDb(db);
   }
   res.json({ ok: true, locks: db.locks });
+});
+
+// ─── Daily forms: one independent record per calendar day ──────────────────
+// POST /api/daily-forms { date } → 201 created | 200 already exists
+// (frontend shows "A form already exists for this date." with Open/Cancel).
+// An explicit row is stored even when the form has zero entries, so empty
+// days exist, cannot be duplicated, and appear in Daily Records / navigation.
+app.post('/api/daily-forms', async (req, res) => {
+  const date = cleanText(req.body?.date);
+  if (!isValidFormDate(date)) {
+    res.status(400).json({ ok: false, error: 'A valid date is required.' });
+    return;
+  }
+  const createdAt = new Date().toISOString();
+  if (hasDb()) {
+    await ensureSchema();
+    const existing = await pool.query(
+      `SELECT to_char(date, 'YYYY-MM-DD') AS date, created_at AS "createdAt" FROM daily_forms WHERE date = $1
+       UNION
+       SELECT to_char(date, 'YYYY-MM-DD') AS date, MIN(created_at) AS "createdAt" FROM records WHERE date = $1 GROUP BY date
+       LIMIT 1`,
+      [date]
+    );
+    if (existing.rowCount > 0) {
+      res.status(200).json({ ok: false, exists: true, form: { date, createdAt: existing.rows[0].createdAt || createdAt } });
+      return;
+    }
+    await pool.query(
+      `INSERT INTO daily_forms (date, created_at) VALUES ($1,$2) ON CONFLICT (date) DO NOTHING`,
+      [date, createdAt]
+    );
+  } else {
+    const db = await readDb();
+    if (formDateExists(db.dailyForms, db.records, date)) {
+      res.status(200).json({ ok: false, exists: true, form: { date, createdAt } });
+      return;
+    }
+    db.dailyForms = [...(db.dailyForms || []), { date, createdAt }];
+    await writeDb(db);
+  }
+  res.status(201).json({ ok: true, exists: false, form: { date, createdAt } });
+});
+
+app.get('/api/daily-forms', async (_req, res) => {
+  const db = await readDb();
+  res.json({ ok: true, forms: db.dailyForms || [] });
 });
 
 app.post('/api/sync/retry', async (_req, res) => {

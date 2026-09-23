@@ -45,8 +45,23 @@ If you have legacy data in `data/records.json`, run:
 node server/migrate.js
 ```
 
-This reads the JSON file and upserts all records, locks, and sync events into
-PostgreSQL, then reports counts for verification.
+This reads the JSON file and upserts all records, locks, sync events and daily
+forms into PostgreSQL, then reports counts for verification.
+
+### Daily Forms (one per calendar day)
+
+Each calendar day is tracked as its own independent record in the
+`daily_forms` table (`date`, `created_at`). Use the **"▼ New Daily Form"**
+button near the top of the Daily Register to open a date picker, pick an
+official date and create an empty form for that day. The system blocks
+duplicate forms for the same date ("A form already exists for this date") and
+the date selector next to the header lets staff jump between previous days —
+editing one day never affects another. Printing prints only the currently
+selected day's form.
+
+The `records` table still stores every laundry row (material / colour / shift /
+quantity / personnel / verified-by / signature). Monthly reports aggregate all
+daily forms within the selected month automatically.
 
 ### Database maintenance
 

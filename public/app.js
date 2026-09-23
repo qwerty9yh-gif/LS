@@ -1,16 +1,27 @@
 const SHIFTS = [
   { key: 'morning', label: 'Shift 1 (Morning)', time: 'Morning shift' },
   { key: 'afternoon', label: 'Shift 2 (Afternoon)', time: 'Afternoon shift' },
-  { key: 'evening', label: 'Shift 3 (Evening)', time: 'Evening shift' },
+  { key: 'evening', label: 'Shift 3 (Straight Day Shift)', time: 'Straight day shift' },
   { key: 'night', label: 'Shift 4 (Night)', time: 'Night shift' }
 ];
 
+// NOTE: Shift 3's storage key stays 'evening' everywhere (records, locks,
+// database enum, printed row ids) so existing rows keep working — only the
+// user-facing label changed to "Shift 3 (Straight Day Shift)".
+
 const MATERIALS = [
   { key: 'shirts', label: 'Shirts', colors: ['White', 'Blue', 'Brown', 'Grey'] },
-  { key: 'uniforms', label: 'Uniforms', colors: ['Grey', 'White'] },
   { key: 'trousers', label: 'Trousers', colors: ['Grey', 'Blue', 'Brown'] },
-  { key: 'overcoats', label: 'Overcoats', colors: ['White', 'Blue Black', 'Cereals High Hygiene'] }
+  { key: 'overcoats', label: 'Overcoats', colors: ['White', 'Blue Black', 'Cereals High Hygiene'] },
+  { key: 'towels', label: 'Towels', colors: ['White', 'Blue', 'Green', 'Yellow'] },
+  { key: 'tablecloths', label: 'Table Clothes', colors: ['White', 'Cream', 'Blue'] },
+  { key: 'bedsheets', label: 'Bed Sheets', colors: ['White', 'Cream', 'Blue', 'Green'] }
 ];
+
+// Retired categories: never rendered as editable sections, never counted in
+// any total — but historical rows stay readable in Daily Records / print.
+const RETIRED_MATERIALS = new Set(['Uniforms']);
+const isRetiredMaterial = (label) => RETIRED_MATERIALS.has(String(label || '').trim());
 
 const STATUS_LABELS = {
   received: 'Received',
@@ -18,8 +29,8 @@ const STATUS_LABELS = {
   dispatched: 'Dispatched'
 };
 
-const STORAGE_KEY = 'laundry-tracking-state-v3';
-const LEGACY_STORAGE_KEY = 'laundry-tracking-state-v2';
+const STORAGE_KEY = 'laundry-tracking-state-v4';
+const LEGACY_STORAGE_KEYS = ['laundry-tracking-state-v3', 'laundry-tracking-state-v2'];
 const AUTH_KEY = 'laundry-auth-v1';
 const API_BASE = String(window.LAUNDRY_API_BASE || '').replace(/\/+$/, '');
 const todayIso = () => new Date().toISOString().slice(0, 10);
@@ -32,6 +43,8 @@ let state = {
   records: [],
   locks: [],
   syncEvents: [],
+  dailyForms: [],
+  formModal: null,
   online: navigator.onLine,
   syncing: false,
   notice: ''
@@ -42,8 +55,15 @@ let saveTimer;
 
 function loadLocal() {
   try {
-    const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || localStorage.getItem(LEGACY_STORAGE_KEY) || '{}');
-    state = { ...state, ...saved, tab: saved.tab || 'daily', selectedDate: saved.selectedDate || todayIso(), online: navigator.onLine, syncing: false };
+    let raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) {
+      for (const legacyKey of LEGACY_STORAGE_KEYS) {
+        raw = localStorage.getItem(legacyKey);
+        if (raw) break;
+      }
+    }
+    const saved = JSON.parse(raw || '{}');
+    state = { ...state, ...saved, tab: saved.tab || 'daily', selectedDate: saved.selectedDate || todayIso(), dailyForms: Array.isArray(saved.dailyForms) ? saved.dailyForms : [], formModal: null, online: navigator.onLine, syncing: false };
   } catch {
     saveLocal();
   }
@@ -56,8 +76,24 @@ function saveLocal() {
     records: state.records,
     locks: state.locks,
     syncEvents: state.syncEvents,
+    dailyForms: state.dailyForms,
     notice: state.notice
   }));
+}
+
+const isValidFormDate = (value) => /^\d{4}-\d{2}-\d{2}$/.test(String(value || '')) && !Number.isNaN(new Date(`${value}T12:00:00`).getTime());
+
+function formExists(date) {
+  if (!isValidFormDate(date)) return false;
+  if ((state.dailyForms || []).some((form) => form && form.date === date)) return true;
+  return (state.records || []).some((record) => record && record.date === date);
+}
+
+function registerDailyForm(date) {
+  if (!isValidFormDate(date)) return;
+  if (!formExists(date)) {
+    state.dailyForms = [...(state.dailyForms || []), { date, createdAt: new Date().toISOString() }];
+  }
 }
 
 async function api(path, options = {}) {
@@ -97,12 +133,34 @@ function mergeServerState(db) {
   state.records = Array.from(byId.values());
   state.locks = db.locks || state.locks;
   state.syncEvents = db.syncEvents || state.syncEvents;
+  // Merge explicit daily forms from the server with local ones, plus every
+  // date that already has records (pre-existing days count as existing forms).
+  const formsByDate = new Map((state.dailyForms || []).map((form) => [form?.date, form]));
+  for (const form of db.dailyForms || db.forms || []) {
+    if (form?.date && !formsByDate.has(form.date)) formsByDate.set(form.date, form);
+  }
+  for (const record of state.records) {
+    if (record?.date && !formsByDate.has(record.date)) {
+      formsByDate.set(record.date, { date: record.date, createdAt: record.createdAt || null });
+    }
+  }
+  state.dailyForms = Array.from(formsByDate.values())
+    .filter((form) => isValidFormDate(form?.date))
+    .sort((a, b) => b.date.localeCompare(a.date));
 }
 
 function normalizeRecord(record) {
   const material = record.material || '';
+  const rawShift = String(record.shift || 'morning');
+  const compactShift = rawShift.toLowerCase().replace(/[\s_\-]+/g, '');
+  // Legacy clients may still send the old "Evening" label or a "straight"
+  // alias for Shift 3 — always normalize to the 'evening' storage key.
+  const shift = compactShift === 'straight' || compactShift === 'straightday' || compactShift === 'straightdayshift'
+    ? 'evening'
+    : record.shift || 'morning';
   return {
     ...record,
+    shift,
     color: record.color || '',
     rowKey: record.rowKey || (record.color ? `${slug(material)}:${slug(record.color)}` : ''),
     quantity: record.quantity === '' || record.quantity === null || record.quantity === undefined ? null : Number(record.quantity),
@@ -140,10 +198,13 @@ function recordMap(date) {
 }
 
 function allDates() {
-  const dates = new Set(state.records.map((record) => record.date));
+  const dates = new Set([
+    ...(state.dailyForms || []).map((form) => form?.date).filter(isValidFormDate),
+    ...state.records.map((record) => record.date)
+  ]);
   dates.add(state.selectedDate || todayIso());
   dates.add(todayIso());
-  return Array.from(dates).sort((a, b) => b.localeCompare(a));
+  return Array.from(dates).filter(isValidFormDate).sort((a, b) => b.localeCompare(a));
 }
 
 function quantityValue(value) {
@@ -177,11 +238,22 @@ function canonicalRows(date, shift) {
     rows.push(...extras);
   }
   const legacy = recordsForShift(date, shift).filter((record) => {
+    // Retired categories (e.g. historical Uniforms) are NEVER part of the
+    // editable register or any total — they live in archivedRows() instead.
+    if (isRetiredMaterial(record.material)) return false;
     if (record.color) return false;
     return !MATERIALS.some((material) => material.label === record.material);
   });
   rows.push(...legacy);
   return rows;
+}
+
+function archivedRows(date, shift) {
+  // Historical rows for retired categories (Uniforms) only. Shown read-only
+  // under "Archived Records" so old data is never lost, but excluded from
+  // every total and monthly aggregation. (Other unknown colourless legacy
+  // rows remain editable via canonicalRows.)
+  return recordsForShift(date, shift).filter((record) => isRetiredMaterial(record.material));
 }
 
 function buildRecordFromInput(input) {
@@ -460,33 +532,86 @@ function installModeText() {
 }
 
 function renderDailyPage() {
+  const dates = allDates();
+  const idx = dates.indexOf(state.selectedDate);
+  const prevDate = idx >= 0 ? dates[idx + 1] || null : null;
+  const nextDate = idx > 0 ? dates[idx - 1] || null : null;
   return `
     <section class="daily-shell">
-      <div class="register-toolbar no-print">
-        <label>Date <input type="date" data-date-picker value="${state.selectedDate}"></label>
-        <button class="primary-button" data-action="print">Print</button>
+      <div class="register-toolbar no-print form-toolbar">
+        <div class="form-toolbar-left">
+          <button class="primary-button new-form-button" data-action="open-new-form">+ New Daily Form</button>
+          <button class="mini-button" data-action="new-today">Today</button>
+        </div>
+        <div class="form-toolbar-right">
+          <button class="mini-button" data-action="prev-day" ${prevDate ? '' : 'disabled'} aria-label="Previous day">←</button>
+          <label class="day-picker-label">Form date <input type="date" data-date-picker value="${state.selectedDate}"></label>
+          <button class="mini-button" data-action="next-day" ${nextDate ? '' : 'disabled'} aria-label="Next day">→</button>
+        </div>
       </div>
       <div class="print-area">
         <div class="register-title">
-          <h2>Laundry Daily Tracking Table</h2>
+          <h2>Daily Register — ${formatDate(state.selectedDate)}</h2>
           <div>Date: <strong>${formatDate(state.selectedDate)}</strong></div>
+        </div>
+        <div class="no-print" style="margin-bottom:10px;display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+          <span class="subtle">Viewing form for <strong>${formatDate(state.selectedDate)}</strong> · ${dates.length} saved form${dates.length === 1 ? '' : 's'} · editing one day never affects another.</span>
+          <span style="flex:1"></span>
+          <button class="primary-button" data-action="print">Print This Day</button>
         </div>
         ${SHIFTS.map((shift) => renderShiftBlock(shift)).join('')}
         <table class="overall-table" aria-label="Overall daily total">
           <tbody>
             <tr>
-              <th>Overall Daily Total</th>
+              <th>Overall Daily Total — ${formatDate(state.selectedDate)}</th>
               <td data-daily-total>${dailyTotal(state.selectedDate)}</td>
             </tr>
           </tbody>
         </table>
       </div>
     </section>
+    ${renderFormModal()}
+  `;
+}
+
+function renderFormModal() {
+  const modal = state.formModal;
+  if (!modal) return '';
+  if (modal.mode === 'duplicate') {
+    return `
+      <div class="modal-overlay" data-modal-overlay>
+        <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="form-modal-title">
+          <h3 id="form-modal-title">Form Already Exists</h3>
+          <p class="subtle">A form already exists for <strong>${formatDate(modal.date)}</strong>.</p>
+          <div class="modal-actions">
+            <button class="mini-button" data-action="close-modal">Cancel</button>
+            <button class="primary-button" data-action="open-existing-form" data-date="${modal.date}">Open Existing</button>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+  return `
+    <div class="modal-overlay" data-modal-overlay>
+      <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="form-modal-title">
+        <h3 id="form-modal-title">Create New Daily Laundry Form</h3>
+        <p class="subtle">Pick the official date for this form. A date can only have one form — duplicates are blocked.</p>
+        <label class="modal-label">Form date
+          <input type="date" data-new-form-date value="${modal.draftDate || todayIso()}" max="9999-12-31">
+        </label>
+        ${modal.error ? `<p class="login-error">${escapeHtml(modal.error)}</p>` : ''}
+        <div class="modal-actions">
+          <button class="mini-button" data-action="close-modal">Cancel</button>
+          <button class="primary-button" data-action="create-form">Create</button>
+        </div>
+      </div>
+    </div>
   `;
 }
 
 function renderShiftBlock(shift) {
   const rows = canonicalRows(state.selectedDate, shift.key);
+  const archived = archivedRows(state.selectedDate, shift.key);
   const locked = isLocked(state.selectedDate, shift.key);
   const shiftMeta = rows.find((row) => row.laundryPersonnel || row.verifiedBy || row.signature) || {};
   return `
@@ -523,6 +648,20 @@ function renderShiftBlock(shift) {
             <td><input data-shift="${shift.key}" data-shift-field="verifiedBy" value="${escapeAttr(shiftMeta.verifiedBy || '')}" ${locked ? 'readonly' : ''}></td>
           </tr>
           ${MATERIALS.map((material) => renderMaterialRows(shift, material, rows, locked)).join('')}
+          ${archived.length ? `
+          <tr class="material-heading archived-heading">
+            <td></td>
+            <td colspan="4"><span>Archived Records (read-only, excluded from totals)</span></td>
+          </tr>
+          ${archived.map((row) => `
+            <tr class="archived-row">
+              <td></td>
+              <td>${escapeHtml(row.material)} — ${escapeHtml(row.color || '—')}</td>
+              <td>${quantityNumber(row.quantity)}</td>
+              <td>${escapeHtml(row.laundryPersonnel || '')}</td>
+              <td>${escapeHtml(row.verifiedBy || '')}</td>
+            </tr>`).join('')}
+          ` : ''}
           <tr class="shift-total-row">
             <td></td>
             <td>Shift Total</td>
@@ -630,6 +769,8 @@ function monthlyRows(month) {
   const grouped = new Map();
   for (const record of state.records.map(normalizeRecord)) {
     if (!record.date?.startsWith(month)) continue;
+    // Retired categories are excluded from Monthly Tracking entirely.
+    if (isRetiredMaterial(record.material)) continue;
     const material = record.material || 'Unlabelled';
     const color = record.color || '';
     const key = `${material}::${color}`;
@@ -644,6 +785,31 @@ function monthlyRows(month) {
     }
   }
   return Array.from(grouped.values()).sort((a, b) => `${a.material}${a.color}`.localeCompare(`${b.material}${b.color}`));
+}
+
+async function createDailyForm(date) {
+  if (!isValidFormDate(date)) {
+    state.formModal = { mode: 'create', draftDate: date || todayIso(), error: 'A valid date is required.' };
+    return render();
+  }
+  if (formExists(date)) {
+    state.formModal = { mode: 'duplicate', date, draftDate: date };
+    saveLocal();
+    return render();
+  }
+  registerDailyForm(date);
+  state.selectedDate = date;
+  state.tab = 'daily';
+  state.formModal = null;
+  saveLocal();
+  // Persist the new empty form to the server so duplicate detection works
+  // across devices. If the server is unreachable the local record is enough.
+  try {
+    await api('api/daily-forms', { method: 'POST', body: JSON.stringify({ date }) });
+  } catch {
+    // offline: local dailyForms array already records the new form
+  }
+  render();
 }
 
 function bindEvents(root) {
@@ -700,18 +866,72 @@ function bindEvents(root) {
       requestAnimationFrame(() => window.print());
     });
   });
-  root.querySelectorAll('[data-action]').forEach((element) => {
+    root.querySelectorAll('[data-action]').forEach((element) => {
     element.addEventListener('click', async () => {
-      if (element.dataset.action === 'retry-sync') await retrySync();
-      if (element.dataset.action === 'print') window.print();
-      if (element.dataset.action === 'new-today') {
+      const action = element.dataset.action;
+      if (action === 'retry-sync') await retrySync();
+      if (action === 'print') window.print();
+      if (action === 'new-today') {
         state.selectedDate = todayIso();
         state.tab = 'daily';
         saveLocal();
         render();
       }
+      if (action === 'open-new-form') {
+        state.formModal = { mode: 'create', draftDate: todayIso(), date: todayIso() };
+        render();
+      }
+      if (action === 'close-modal') {
+        state.formModal = null;
+        render();
+      }
+      if (action === 'create-form') {
+        const picker = root.querySelector('[data-new-form-date]');
+        const date = picker?.value || todayIso();
+        await createDailyForm(date);
+      }
+      if (action === 'open-existing-form') {
+        const date = element.dataset.date;
+        if (isValidFormDate(date)) {
+          state.selectedDate = date;
+          state.tab = 'daily';
+          state.formModal = null;
+          saveLocal();
+          render();
+        }
+      }
+      if (action === 'prev-day' || action === 'next-day') {
+        const dates = allDates();
+        const idx = dates.indexOf(state.selectedDate);
+        let next;
+        if (action === 'prev-day' && idx >= 0) next = dates[idx + 1] || null;
+        if (action === 'next-day' && idx > 0) next = dates[idx - 1] || null;
+        if (next) {
+          state.selectedDate = next;
+          saveLocal();
+          render();
+        }
+      }
     });
   });
+  // Close modal on Escape / overlay click (clicking inside the card is fine).
+  root.querySelectorAll('[data-modal-overlay]').forEach((overlay) => {
+    const onKey = (e) => { if (e.key === 'Escape') { state.formModal = null; render(); } };
+    overlay.addEventListener('click', (e) => {
+      if (e.target === overlay) { state.formModal = null; render(); }
+    });
+    overlay.addEventListener('keydown', onKey);
+  });
+  if (state.formModal) {
+    const picker = root.querySelector('[data-new-form-date]');
+    if (picker) picker.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        const date = picker.value || todayIso();
+        createDailyForm(date);
+      }
+    });
+  }
 }
 
 function cssEscape(value) {
