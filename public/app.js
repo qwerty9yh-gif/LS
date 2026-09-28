@@ -1027,12 +1027,6 @@ function monthlyRows(month) {
     grouped.set(key, row);
   }
   for (const material of MATERIALS) {
-    for (const color of material.colors) {
-      const key = `${material.label}::${color}`;
-      if (!grouped.has(key)) grouped.set(key, { material: material.label, color, total: 0 });
-    }
-  }
-  for (const material of MATERIALS) {
     for (const color of materialColorsFor(material.label)) {
       const key = `${material.label}::${color.label}`;
       if (!grouped.has(key)) grouped.set(key, { material: material.label, color: color.label, total: 0 });
