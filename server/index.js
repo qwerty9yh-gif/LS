@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import pg from 'pg';
+import { PrismaClient } from '@prisma/client';
 import { google } from 'googleapis';
 import { setTimeout as delay } from 'node:timers/promises';
 import { verifyPassword } from './auth.js';
@@ -82,6 +83,7 @@ const pool = new pg.Pool({
   idleTimeoutMillis: 30000,
   connectionTimeoutMillis: 15000,
 });
+const prisma = new PrismaClient();
 
 pool.on('error', (err) => {
   // 'error' on an idle client would otherwise crash the process.
@@ -134,8 +136,30 @@ function dbRecordToApi(row) {
   };
 }
 
+function prismaRecordToApi(row) {
+  return {
+    id: row.id,
+    date: toDateOnly(row.date),
+    shift: row.shift,
+    material: row.material,
+    color: row.color || '',
+    rowKey: row.rowKey || '',
+    quantity: row.quantity === null || row.quantity === undefined ? null : Number(row.quantity),
+    laundryPersonnel: row.laundryPersonnel,
+    verifiedBy: row.verifiedBy,
+    signature: row.signature || '',
+    status: row.status,
+    syncStatus: row.syncStatus,
+    syncError: row.syncError,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+    syncedAt: row.syncedAt,
+  };
+}
+
 function dbLockToApi(row) {
   return {
+    id: row.id,
     key: `${toDateOnly(row.date)}:${row.shift}`,
     date: toDateOnly(row.date),
     shift: row.shift,
@@ -502,6 +526,62 @@ function mergeRecords(localRecords, remoteRecords) {
   return Array.from(byId.values()).sort((a, b) => `${a.date}${a.shift}`.localeCompare(`${b.date}${b.shift}`));
 }
 
+async function mergeGoogleRecordsIntoPostgres(localRecords, remoteRecords, syncedAt, event) {
+  const merged = mergeRecords(localRecords, remoteRecords);
+  const localById = new Map(localRecords.map((record) => [record.id, record]));
+  const mergedById = new Map(merged.map((record) => [record.id, record]));
+  const imported = remoteRecords.filter((remote) => {
+    const local = localById.get(remote.id);
+    return !local || new Date(remote.updatedAt || 0) >= new Date(local.updatedAt || 0);
+  });
+
+  await prisma.$transaction(async (tx) => {
+    if (syncedAt) {
+      await tx.record.updateMany({
+        where: { id: { in: localRecords.filter((record) => record.syncStatus !== 'synced').map((record) => record.id) } },
+        data: { syncStatus: 'synced', syncError: '', syncedAt: new Date(syncedAt) },
+      });
+    }
+    for (const remote of imported) {
+      const record = cleanRecord(mergedById.get(remote.id) || remote);
+      const date = new Date(`${record.date}T00:00:00.000Z`);
+      const updatedAt = new Date(record.updatedAt || syncedAt || Date.now());
+      const fields = {
+        date,
+        shift: record.shift,
+        material: record.material || '',
+        color: record.color || '',
+        rowKey: record.rowKey || '',
+        quantity: record.quantity === '' || record.quantity === null || record.quantity === undefined
+          ? null
+          : Number(record.quantity),
+        laundryPersonnel: record.laundryPersonnel || '',
+        verifiedBy: record.verifiedBy || '',
+        signature: record.signature || '',
+        status: record.status || 'received',
+        syncStatus: 'synced',
+        syncError: '',
+        updatedAt,
+        syncedAt: new Date(syncedAt || Date.now()),
+      };
+      await tx.record.upsert({
+        where: { id: record.id },
+        create: { id: record.id, ...fields, createdAt: new Date(record.createdAt || updatedAt) },
+        update: fields,
+      });
+    }
+    await tx.syncEvent.create({
+      data: {
+        at: new Date(event.at || syncedAt || Date.now()),
+        status: event.status,
+        error: event.error || null,
+        detail: event.detail || undefined,
+      },
+    });
+  });
+  return readDb();
+}
+
 // ─── Authentication: single universal account ────────────────────────────────
 // The whole application shares ONE seeded login account (server/seed-user.js).
 // No registration, no profiles, no password reset, no device/IP tracking.
@@ -526,7 +606,7 @@ app.post('/api/auth/login', async (req, res) => {
       res.status(401).json({ ok: false, error: 'Incorrect email or password.' });
       return;
     }
-    await pool.query('UPDATE users SET last_login_at = NOW() WHERE id = $1', [user.id]);
+    await prisma.user.updateMany({ where: { id: user.id }, data: { lastLoginAt: new Date() } });
     res.json({ ok: true, user: { email: user.email } });
   } catch (err) {
     res.status(500).json({ ok: false, error: 'Sign in failed on the server.' });
@@ -545,32 +625,46 @@ app.put('/api/records', async (req, res) => {
     // Surgical upsert: touch ONLY the incoming ids. Never rewrite the whole
     // table from a snapshot — a snapshot would overwrite other writers'
     // updatedAt values and could resurrect just-deleted rows.
+    let savedRecords = [];
     if (hasDb()) {
       await ensureSchema();
       const now = new Date().toISOString();
-      for (const record of cleaned) {
-        await pool.query(
-          `INSERT INTO records (id, date, shift, material, color, row_key, quantity, laundry_personnel, verified_by, signature, status, sync_status, sync_error, created_at, updated_at, synced_at)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'pending','',$12,$13,NULL)
-           ON CONFLICT (id) DO UPDATE SET
-             date = EXCLUDED.date, shift = EXCLUDED.shift, material = EXCLUDED.material,
-             color = EXCLUDED.color, row_key = EXCLUDED.row_key, quantity = EXCLUDED.quantity,
-             laundry_personnel = EXCLUDED.laundry_personnel, verified_by = EXCLUDED.verified_by,
-             signature = EXCLUDED.signature, status = EXCLUDED.status,
-             sync_status = 'pending', sync_error = '', updated_at = EXCLUDED.updated_at`,
-          [record.id, record.date, record.shift, record.material || '', record.color || '', record.rowKey || '',
-           record.quantity === '' || record.quantity === null || record.quantity === undefined ? null : Number(record.quantity),
-           record.laundryPersonnel || '', record.verifiedBy || '', record.signature || '', record.status || 'received',
-           record.createdAt || now, now]
-        );
-        // Every edited day is an existing daily form (idempotent).
-        await pool.query(
-          `INSERT INTO daily_forms (date, created_at)
-           VALUES ($1,$2)
-           ON CONFLICT (date) DO NOTHING`,
-          [record.date, record.createdAt || now]
-        ).catch(() => {});
-      }
+      savedRecords = await prisma.$transaction(async (tx) => {
+        const committed = [];
+        for (const record of cleaned) {
+          const date = new Date(`${record.date}T00:00:00.000Z`);
+          const quantity = record.quantity === '' || record.quantity === null || record.quantity === undefined
+            ? null
+            : Number(record.quantity);
+          const saved = await tx.$queryRaw`
+            INSERT INTO records (
+              id, date, shift, material, color, row_key, quantity,
+              laundry_personnel, verified_by, signature, status, sync_status,
+              sync_error, created_at, updated_at, synced_at
+            ) VALUES (
+              ${record.id}, ${date}, ${record.shift}::shift_type, ${record.material || ''},
+              ${record.color || ''}, ${record.rowKey || ''}, ${quantity},
+              ${record.laundryPersonnel || ''}, ${record.verifiedBy || ''},
+              ${record.signature || ''}, ${(record.status || 'received')}::record_status,
+              'pending'::sync_status, '', ${new Date(record.createdAt || now)}, clock_timestamp(), NULL
+            )
+            ON CONFLICT (id) DO UPDATE SET
+              date = EXCLUDED.date, shift = EXCLUDED.shift, material = EXCLUDED.material,
+              color = EXCLUDED.color, row_key = EXCLUDED.row_key, quantity = EXCLUDED.quantity,
+              laundry_personnel = EXCLUDED.laundry_personnel, verified_by = EXCLUDED.verified_by,
+              signature = EXCLUDED.signature, status = EXCLUDED.status,
+              sync_status = 'pending', sync_error = '', updated_at = clock_timestamp(), synced_at = NULL
+            RETURNING *
+          `;
+          await tx.dailyForm.upsert({
+            where: { date },
+            create: { date, createdAt: new Date(record.createdAt || now) },
+            update: {},
+          });
+          committed.push(dbRecordToApi(saved[0]));
+        }
+        return committed;
+      });
     } else {
       const db = await readDb();
       const byId = new Map(db.records.map((record) => [record.id, record]));
@@ -590,7 +684,7 @@ app.put('/api/records', async (req, res) => {
       db.records = Array.from(byId.values()).sort((a, b) => `${a.date}${a.shift}`.localeCompare(`${b.date}${b.shift}`));
       await writeDb(db);
     }
-    const db = await readDb();
+    const db = hasDb() ? null : await readDb();
 
     // Respond immediately so the foreground request never blocks on the
     // Google Sheets export (which can be slow to time out). Run the export
@@ -598,54 +692,33 @@ app.put('/api/records', async (req, res) => {
     // whole table, which is what resurrected just-deleted rows. Here we only
     // touch the synced ids and append one event, so concurrent deletes
     // cannot be undone.
-    res.status(202).json({ ok: true, records: db.records, sync: { status: 'pending' } });
+    res.status(202).json({ ok: true, records: hasDb() ? savedRecords : db.records, sync: { status: 'pending' } });
 
     try {
       const result = await syncRecordsToGoogle(cleaned);
       const syncedAt = new Date().toISOString();
       const syncedIds = new Set(cleaned.map((record) => record.id));
-      const tx = await pool.connect();
-      try {
-        await tx.query('BEGIN');
+      await prisma.$transaction(async (tx) => {
         for (const id of syncedIds) {
-          await tx.query(
-            `UPDATE records SET sync_status = 'synced', sync_error = '', synced_at = $2
-              WHERE id = $1`,
-            [id, syncedAt]
-          );
+          await tx.record.updateMany({
+            where: { id },
+            data: { syncStatus: 'synced', syncError: '', syncedAt: new Date(syncedAt) },
+          });
         }
-        await tx.query(
-          'INSERT INTO sync_events (at, status, detail) VALUES ($1, $2, $3)',
-          [syncedAt, 'synced', JSON.stringify(result)]
-        );
-        await tx.query('COMMIT');
-      } catch (err) {
-        await tx.query('ROLLBACK');
-        throw err;
-      } finally {
-        tx.release();
-      }
+        await tx.syncEvent.create({
+          data: { at: new Date(syncedAt), status: 'synced', detail: result },
+        });
+      });
     } catch (error) {
-      const tx = await pool.connect();
-      try {
-        await tx.query('BEGIN');
+      await prisma.$transaction(async (tx) => {
         for (const rec of cleaned) {
-          await tx.query(
-            `UPDATE records SET sync_status = 'pending', sync_error = $2
-              WHERE id = $1`,
-            [rec.id, error.message]
-          );
+          await tx.record.updateMany({
+            where: { id: rec.id },
+            data: { syncStatus: 'pending', syncError: error.message },
+          });
         }
-        await tx.query(
-          'INSERT INTO sync_events (at, status, error) VALUES (NOW(), $1, $2)',
-          ['pending', error.message]
-        );
-        await tx.query('COMMIT');
-      } catch (err) {
-        await tx.query('ROLLBACK').catch(() => {});
-      } finally {
-        tx.release();
-      }
+        await tx.syncEvent.create({ data: { status: 'pending', error: error.message } });
+      });
     }
   } catch (error) {
     res.status(400).json({ ok: false, error: error.message });
@@ -657,8 +730,8 @@ app.delete('/api/records/:id', async (req, res) => {
     await ensureSchema();
     // Surgical delete: remove exactly one row by id. No snapshot rewrite,
     // so concurrent writers cannot resurrect it.
-    const result = await pool.query('DELETE FROM records WHERE id = $1', [req.params.id]);
-    res.json({ ok: true, deleted: result.rowCount });
+    const result = await prisma.record.deleteMany({ where: { id: req.params.id } });
+    res.json({ ok: true, deleted: result.count });
     return;
   }
   const db = await readDb();
@@ -675,8 +748,19 @@ app.post('/api/locks', async (req, res) => {
     res.status(400).json({ ok: false, error: 'Valid date and shift are required.' });
     return;
   }
-  const db = await readDb();
   const key = lockKey(date, shift);
+  if (hasDb()) {
+    const lockDate = new Date(`${date}T00:00:00.000Z`);
+    await prisma.lock.upsert({
+      where: { date_shift: { date: lockDate, shift } },
+      create: { date: lockDate, shift, reason: 'Shift closed' },
+      update: {},
+    });
+    const db = await readDb();
+    res.json({ ok: true, locks: db.locks });
+    return;
+  }
+  const db = await readDb();
   if (!db.locks.some((item) => item.key === key)) {
     db.locks.push({ key, date, shift, lockedAt: new Date().toISOString(), reason: 'Shift closed' });
     await writeDb(db);
@@ -709,10 +793,11 @@ app.post('/api/daily-forms', async (req, res) => {
       res.status(200).json({ ok: false, exists: true, form: { date, createdAt: existing.rows[0].createdAt || createdAt } });
       return;
     }
-    await pool.query(
-      `INSERT INTO daily_forms (date, created_at) VALUES ($1,$2) ON CONFLICT (date) DO NOTHING`,
-      [date, createdAt]
-    );
+    await prisma.dailyForm.upsert({
+      where: { date: new Date(`${date}T00:00:00.000Z`) },
+      create: { date: new Date(`${date}T00:00:00.000Z`), createdAt: new Date(createdAt) },
+      update: {},
+    });
   } else {
     const db = await readDb();
     if (formDateExists(db.dailyForms, db.records, date)) {
@@ -733,6 +818,26 @@ app.get('/api/daily-forms', async (_req, res) => {
 app.post('/api/sync/retry', async (_req, res) => {
   const db = await readDb();
   const pending = db.records.filter((record) => record.syncStatus !== 'synced');
+  if (hasDb()) {
+    try {
+      const result = await syncRecordsToGoogle(pending);
+      const remoteRecords = await pullRecordsFromGoogle();
+      const syncedAt = new Date().toISOString();
+      const latest = await mergeGoogleRecordsIntoPostgres(db.records, remoteRecords, syncedAt, {
+        at: syncedAt,
+        status: 'synced',
+        detail: { ...result, pulled: remoteRecords.length },
+      });
+      res.json({ ok: true, sync: { status: 'synced', ...result, pulled: remoteRecords.length }, records: latest.records });
+    } catch (error) {
+      const latest = await mergeGoogleRecordsIntoPostgres(db.records, [], null, {
+        status: 'pending',
+        error: error.message,
+      });
+      res.status(202).json({ ok: true, sync: { status: 'pending', error: error.message }, records: latest.records });
+    }
+    return;
+  }
   try {
     const result = await syncRecordsToGoogle(pending);
     const remoteRecords = await pullRecordsFromGoogle();
@@ -753,6 +858,25 @@ app.post('/api/sync/retry', async (_req, res) => {
 
 app.post('/api/sync/pull', async (_req, res) => {
   const db = await readDb();
+  if (hasDb()) {
+    try {
+      const remoteRecords = await pullRecordsFromGoogle();
+      const pulledAt = new Date().toISOString();
+      const latest = await mergeGoogleRecordsIntoPostgres(db.records, remoteRecords, null, {
+        at: pulledAt,
+        status: 'pulled',
+        detail: { pulled: remoteRecords.length },
+      });
+      res.json({ ok: true, sync: { status: 'pulled', pulled: remoteRecords.length }, records: latest.records });
+    } catch (error) {
+      const latest = await mergeGoogleRecordsIntoPostgres(db.records, [], null, {
+        status: 'pull-failed',
+        error: error.message,
+      });
+      res.status(202).json({ ok: true, sync: { status: 'pending', error: error.message }, records: latest.records });
+    }
+    return;
+  }
   try {
     const remoteRecords = await pullRecordsFromGoogle();
     db.records = mergeRecords(db.records, remoteRecords);

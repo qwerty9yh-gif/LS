@@ -1,0 +1,102 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+enum Shift {
+  morning
+  afternoon
+  evening
+  night
+
+  @@map("shift_type")
+}
+
+enum RecordStatus {
+  received
+  pending
+  dispatched
+
+  @@map("record_status")
+}
+
+enum SyncStatus {
+  synced
+  pending
+
+  @@map("sync_status")
+}
+
+model Record {
+  id               String       @id
+  date             DateTime     @db.Date
+  shift            Shift
+  material         String       @default("")
+  color            String       @default("")
+  rowKey           String       @default("") @map("row_key")
+  quantity         Int?
+  laundryPersonnel String       @default("") @map("laundry_personnel")
+  verifiedBy       String       @default("") @map("verified_by")
+  signature        String       @default("")
+  status           RecordStatus @default(received)
+  syncStatus       SyncStatus   @default(pending) @map("sync_status")
+  syncError        String       @default("") @map("sync_error")
+  createdAt        DateTime     @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt        DateTime     @default(now()) @map("updated_at") @db.Timestamptz(6)
+  syncedAt         DateTime?    @map("synced_at") @db.Timestamptz(6)
+
+  @@index([date])
+  @@index([shift])
+  @@index([date, shift])
+  @@index([date, material, color])
+  @@index([syncStatus])
+  @@index([status])
+  @@map("records")
+}
+
+model Lock {
+  id       Int      @id @default(autoincrement())
+  date     DateTime @db.Date
+  shift    Shift
+  lockedAt DateTime @default(now()) @map("locked_at") @db.Timestamptz(6)
+  reason   String   @default("Shift closed")
+
+  @@unique([date, shift])
+  @@index([date, shift])
+  @@map("locks")
+}
+
+model DailyForm {
+  date      DateTime @id @db.Date
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@map("daily_forms")
+}
+
+model SyncEvent {
+  id     Int      @id @default(autoincrement())
+  at     DateTime @default(now()) @db.Timestamptz(6)
+  status String
+  error  String?
+  detail Json?
+
+  @@index([at(sort: Desc)])
+  @@map("sync_events")
+}
+
+model User {
+  id           String    @id @default(uuid()) @db.Uuid
+  email        String    @unique
+  passwordHash String    @map("password_hash")
+  createdAt    DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt    DateTime  @default(now()) @map("updated_at") @db.Timestamptz(6)
+  lastLoginAt  DateTime? @map("last_login_at") @db.Timestamptz(6)
+
+  @@index([email])
+  @@map("users")
+}

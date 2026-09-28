@@ -37,6 +37,28 @@ The schema is defined in `server/schema.sql` and includes:
 - **`locks`** — shift-level locks that make sheets read-only
 - **`sync_events`** — append-only log of Google Sheets sync attempts
 
+Runtime application data writes use Prisma models mapped to these existing
+PostgreSQL tables. Generate and validate the Prisma client with:
+
+```powershell
+npm run prisma:generate
+npm run prisma:validate
+```
+
+### Cross-device live sync
+
+The browser keeps ordered pending mutations in local storage and replays them
+automatically when connectivity returns. Supabase Realtime listens for changes
+to `records`, `locks`, and `daily_forms`; the UI refreshes from the API after a
+Realtime reconnect. To enable subscriptions, set
+`LAUNDRY_SUPABASE_URL` and `LAUNDRY_SUPABASE_ANON_KEY` in both `config.js`
+copies, then run `server/realtime.sql` in the Supabase SQL editor. The anon key
+is public by design; do not put a service-role key in frontend configuration.
+
+The `users` table is intentionally excluded from Realtime because it contains
+password hashes and the app has no user-profile data to synchronize. The
+publication script grants read access only to the three operational tables.
+
 ### Migrating existing data
 
 If you have legacy data in `data/records.json`, run:

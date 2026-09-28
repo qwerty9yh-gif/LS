@@ -6,7 +6,7 @@
  * Usage: npm run db:clear
  */
 import 'dotenv/config';
-import pg from 'pg';
+import { PrismaClient } from '@prisma/client';
 
 const connectionString = process.env.DIRECT_URL || process.env.DATABASE_URL;
 if (!connectionString) {
@@ -14,28 +14,33 @@ if (!connectionString) {
   process.exit(1);
 }
 
-const pool = new pg.Pool({ connectionString, max: 1 });
-const client = await pool.connect();
+const prisma = new PrismaClient({ datasources: { db: { url: connectionString } } });
 
 try {
-  await client.query('BEGIN');
-  for (const table of ['records', 'locks', 'sync_events', 'daily_forms']) {
-    const r = await client.query(`DELETE FROM ${table}`);
-    console.log(`→ Cleared ${table}: ${r.rowCount} row(s) removed`);
+  const [records, locks, syncEvents, dailyForms] = await prisma.$transaction([
+    prisma.record.deleteMany(),
+    prisma.lock.deleteMany(),
+    prisma.syncEvent.deleteMany(),
+    prisma.dailyForm.deleteMany(),
+  ]);
+  for (const [table, result] of Object.entries({ records, locks, sync_events: syncEvents, daily_forms: dailyForms })) {
+    console.log(`→ Cleared ${table}: ${result.count} row(s) removed`);
   }
-  await client.query('COMMIT');
 
   console.log('→ Verification after clearing:');
-  for (const table of ['records', 'locks', 'sync_events', 'daily_forms']) {
-    const r = await client.query(`SELECT COUNT(*) AS c FROM ${table}`);
-    console.log(`  ${table}=${r.rows[0].c}`);
+  const counts = await Promise.all([
+    prisma.record.count(),
+    prisma.lock.count(),
+    prisma.syncEvent.count(),
+    prisma.dailyForm.count(),
+  ]);
+  for (const [table, count] of Object.entries({ records: counts[0], locks: counts[1], sync_events: counts[2], daily_forms: counts[3] })) {
+    console.log(`  ${table}=${count}`);
   }
   console.log('✓ Application data cleared. Schema intact.');
 } catch (err) {
-  await client.query('ROLLBACK').catch(() => {});
   console.error('✖ Clearing failed:', err.message);
   process.exit(1);
 } finally {
-  client.release();
-  await pool.end();
+  await prisma.$disconnect();
 }

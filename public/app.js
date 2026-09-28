@@ -1,3 +1,5 @@
+import { enqueueMutation, readMutationQueue, removeQueuedMutation } from './sync-queue.js';
+
 const SHIFTS = [
   { key: 'morning', label: 'Shift 1 (Morning)', time: 'Morning shift' },
   { key: 'afternoon', label: 'Shift 2 (Afternoon)', time: 'Afternoon shift' },
@@ -47,12 +49,22 @@ let state = {
   dailyForms: [],
   formModal: null,
   online: navigator.onLine,
+  apiConnected: false,
   syncing: false,
   notice: ''
 };
 
 const tableDraft = new Map();
 let saveTimer;
+let mutationRetryTimer = null;
+let mutationRetryDelay = 1000;
+let serverReconnectTimer = null;
+let serverReconnectDelay = 1000;
+let supabaseClient = null;
+let realtimeChannel = null;
+let realtimeStartPromise = null;
+let hydratePromise = null;
+let realtimeRenderTimer = null;
 
 function loadLocal() {
   try {
@@ -99,10 +111,17 @@ function registerDailyForm(date) {
 
 async function api(path, options = {}) {
   const url = API_BASE ? `${API_BASE}/${path.replace(/^\/+/, '')}` : path;
-  const response = await fetch(url, {
-    headers: { 'Content-Type': 'application/json' },
-    ...options
-  });
+  let response;
+  try {
+    response = await fetch(url, {
+      headers: { 'Content-Type': 'application/json' },
+      ...options
+    });
+  } catch (error) {
+    state.apiConnected = false;
+    throw error;
+  }
+  state.apiConnected = true;
   if (!response.ok && response.status !== 202) {
     const body = await response.json().catch(() => ({}));
     throw new Error(body.error || 'Request failed.');
@@ -111,26 +130,49 @@ async function api(path, options = {}) {
 }
 
 async function hydrateFromServer() {
+  if (hydratePromise) return hydratePromise;
+  hydratePromise = (async () => {
+    try {
+      const db = await api('api/records');
+      clearTimeout(serverReconnectTimer);
+      serverReconnectDelay = 1000;
+      mergeServerState(db);
+      state.notice = '';
+    } catch {
+      state.apiConnected = false;
+      clearTimeout(serverReconnectTimer);
+      serverReconnectTimer = setTimeout(() => hydrateFromServer(), serverReconnectDelay);
+      serverReconnectDelay = Math.min(serverReconnectDelay * 2, 30000);
+    }
+    saveLocal();
+    render();
+    if (navigator.onLine) await flushMutationQueue();
+  })();
   try {
-    const db = await api('api/records');
-    mergeServerState(db);
-    state.notice = '';
-  } catch {
-    state.notice = 'Offline mode. Changes will stay on this device until the server is reachable.';
+    await hydratePromise;
+  } finally {
+    hydratePromise = null;
   }
-  saveLocal();
-  render();
 }
 
 function mergeServerState(db) {
-  const byId = new Map(state.records.map((record) => [record.id, normalizeRecord(record)]));
-  for (const record of db.records || []) {
+  const queue = readMutationQueue();
+  const queuedRecordIds = new Set(queue
+    .filter((mutation) => mutation.type === 'save-records')
+    .flatMap((mutation) => mutation.records.map((record) => record.id)));
+  const queuedDeleteIds = new Set(queue
+    .filter((mutation) => mutation.type === 'delete-record')
+    .map((mutation) => mutation.id));
+  const localById = new Map(state.records.map((record) => [record.id, normalizeRecord(record)]));
+  const byId = new Map((db.records || []).map((record) => {
     const normalized = normalizeRecord(record);
-    const local = byId.get(normalized.id);
-    if (!local || new Date(normalized.updatedAt || 0) >= new Date(local.updatedAt || 0)) {
-      byId.set(normalized.id, normalized);
-    }
+    return [normalized.id, normalized];
+  }));
+  for (const id of queuedRecordIds) {
+    const local = localById.get(id);
+    if (local) byId.set(id, local);
   }
+  for (const id of queuedDeleteIds) byId.delete(id);
   state.records = Array.from(byId.values());
   state.locks = db.locks || state.locks;
   state.syncEvents = db.syncEvents || state.syncEvents;
@@ -341,21 +383,9 @@ async function persistDraft() {
 async function persistRecords(records) {
   const now = new Date().toISOString();
   for (const record of records) updateLocalRecord({ ...record, updatedAt: now, syncStatus: 'pending' });
+  enqueueMutation({ type: 'save-records', records: records.map((record) => ({ ...record, updatedAt: now })) });
   saveLocal();
-  try {
-    const result = await api('api/records', {
-      method: 'PUT',
-      body: JSON.stringify({ records })
-    });
-    mergeServerState({ records: result.records || [] });
-    state.notice = result.sync?.status === 'synced'
-      ? 'Saved.'
-      : 'Saved to PostgreSQL. Google Sheets export is pending.';
-  } catch (error) {
-    state.notice = `Saved on this device. Server save pending: ${error.message}`;
-  }
-  saveLocal();
-  renderStatusOnly();
+  if (navigator.onLine) await flushMutationQueue();
 }
 
 async function addColorRow(shift, materialLabel) {
@@ -384,33 +414,71 @@ async function addColorRow(shift, materialLabel) {
 async function deleteRecord(id) {
   state.records = state.records.filter((record) => record.id !== id);
   tableDraft.delete(id);
+  enqueueMutation({ type: 'delete-record', id });
   saveLocal();
   render();
-  try {
-    await api(`api/records/${id}`, { method: 'DELETE' });
-    state.notice = 'Row removed.';
-  } catch (error) {
-    state.notice = `Row removed on this device. Server delete failed: ${error.message}`;
-  }
-  saveLocal();
-  renderStatusOnly();
+  if (navigator.onLine) await flushMutationQueue();
 }
 
-async function retrySync() {
+let mutationFlushPromise = null;
+
+async function flushMutationQueue() {
+  if (!navigator.onLine || mutationFlushPromise) return mutationFlushPromise;
   state.syncing = true;
   renderStatusOnly();
+  mutationFlushPromise = (async () => {
+    while (navigator.onLine) {
+      const mutation = readMutationQueue()[0];
+      if (!mutation) break;
+      try {
+        if (mutation.type === 'save-records') {
+          const result = await api('api/records', {
+            method: 'PUT',
+            body: JSON.stringify({ records: mutation.records })
+          });
+          const remaining = readMutationQueue().filter((item) => item.id !== mutation.id);
+          const editedAgain = new Set(remaining
+            .filter((item) => item.type === 'save-records')
+            .flatMap((item) => item.records.map((record) => record.id)));
+          for (const item of remaining) {
+            if (item.type === 'delete-record') editedAgain.add(item.id);
+          }
+          for (const record of result.records || []) {
+            if (!editedAgain.has(record.id)) updateLocalRecord(normalizeRecord(record));
+          }
+        } else if (mutation.type === 'delete-record') {
+          await api(`api/records/${encodeURIComponent(mutation.id)}`, { method: 'DELETE' });
+          state.records = state.records.filter((record) => record.id !== mutation.id);
+        } else if (mutation.type === 'create-daily-form') {
+          const result = await api('api/daily-forms', {
+            method: 'POST',
+            body: JSON.stringify({ date: mutation.date })
+          });
+          if (result.form) registerDailyForm(result.form.date);
+        }
+        removeQueuedMutation(mutation.id);
+        saveLocal();
+      } catch {
+        if (navigator.onLine) {
+          clearTimeout(mutationRetryTimer);
+          mutationRetryTimer = setTimeout(() => flushMutationQueue(), mutationRetryDelay);
+          mutationRetryDelay = Math.min(mutationRetryDelay * 2, 30000);
+        }
+        break;
+      }
+    }
+  })();
   try {
-    const result = await api('api/sync/retry', { method: 'POST', body: '{}' });
-    mergeServerState({ records: result.records || [] });
-    state.notice = result.sync?.status === 'synced'
-      ? 'Pending records synchronized.'
-      : `Sync still pending: ${result.sync?.error || 'Google Sheets is not available.'}`;
-  } catch (error) {
-    state.notice = `Sync failed: ${error.message}`;
+    await mutationFlushPromise;
+  } finally {
+    mutationFlushPromise = null;
+    state.syncing = false;
+    state.online = navigator.onLine;
+    if (!readMutationQueue().length) mutationRetryDelay = 1000;
+    saveLocal();
+    renderStatusOnly();
+    renderCalculatedTotals();
   }
-  state.syncing = false;
-  saveLocal();
-  render();
 }
 
 function shiftTotal(date, shift) {
@@ -443,8 +511,17 @@ function renderCalculatedTotals() {
 function renderStatusOnly() {
   const notice = document.querySelector('[data-notice]');
   if (notice) notice.textContent = state.notice;
-  const sync = document.querySelector('[data-action="retry-sync"]');
-  if (sync) sync.textContent = state.syncing ? 'Syncing...' : 'Sync';
+  const status = document.querySelector('[data-sync-status]');
+  if (status) status.textContent = `${syncStatusLabel()}${installModeText()}`;
+}
+
+function syncStatusLabel() {
+  if (!navigator.onLine) return 'Offline';
+  if (state.syncing || readMutationQueue().length) return 'Syncing…';
+  if (window.LAUNDRY_SUPABASE_URL && window.LAUNDRY_SUPABASE_ANON_KEY) {
+    return state.realtimeConnected ? 'Connected' : 'Offline';
+  }
+  return state.apiConnected ? 'Connected' : 'Offline';
 }
 
 function isAuthenticated() {
@@ -508,10 +585,9 @@ function render() {
           <div class="brand-mark">LT</div>
           <div>
             <h1>Laundry Tracking</h1>
-            <p class="subtle">${state.online ? 'Online' : 'Offline'}${installModeText()}</p>
+            <p class="subtle" data-sync-status>${syncStatusLabel()}${installModeText()}</p>
           </div>
         </div>
-        <button class="pill" data-action="retry-sync">${state.syncing ? 'Syncing...' : 'Sync'}</button>
       </header>
       <main class="main">
         <nav class="tabs no-print" aria-label="Main navigation">
@@ -803,13 +879,8 @@ async function createDailyForm(date) {
   state.tab = 'daily';
   state.formModal = null;
   saveLocal();
-  // Persist the new empty form to the server so duplicate detection works
-  // across devices. If the server is unreachable the local record is enough.
-  try {
-    await api('api/daily-forms', { method: 'POST', body: JSON.stringify({ date }) });
-  } catch {
-    // offline: local dailyForms array already records the new form
-  }
+  enqueueMutation({ type: 'create-daily-form', date });
+  if (navigator.onLine) await flushMutationQueue();
   render();
 }
 
@@ -870,7 +941,6 @@ function bindEvents(root) {
     root.querySelectorAll('[data-action]').forEach((element) => {
     element.addEventListener('click', async () => {
       const action = element.dataset.action;
-      if (action === 'retry-sync') await retrySync();
       if (action === 'print') window.print();
       if (action === 'new-today') {
         state.selectedDate = todayIso();
@@ -953,14 +1023,149 @@ function escapeAttr(value) {
   return escapeHtml(value).replace(/`/g, '&#096;');
 }
 
+function queueHasRecordMutation(id) {
+  return readMutationQueue().some((mutation) => mutation.type === 'save-records'
+    && mutation.records.some((record) => record.id === id));
+}
+
+function scheduleRealtimeRender() {
+  clearTimeout(realtimeRenderTimer);
+  realtimeRenderTimer = setTimeout(() => {
+    saveLocal();
+    if (!document.hidden) render();
+  }, 80);
+}
+
+function applyRealtimeRecord(payload) {
+  if (payload.eventType === 'DELETE') {
+    const id = payload.old?.id;
+    if (!id || queueHasRecordMutation(id)) return;
+    state.records = state.records.filter((record) => record.id !== id);
+    scheduleRealtimeRender();
+    return;
+  }
+  const row = payload.new;
+  if (!row?.id || queueHasRecordMutation(row.id)) return;
+  const record = normalizeRecord({
+    ...row,
+    rowKey: row.row_key,
+    laundryPersonnel: row.laundry_personnel,
+    verifiedBy: row.verified_by,
+    syncStatus: row.sync_status,
+    syncError: row.sync_error,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    syncedAt: row.synced_at,
+  });
+  const existing = state.records.find((item) => item.id === record.id);
+  if (existing && new Date(existing.updatedAt || 0) > new Date(record.updatedAt || 0)) return;
+  updateLocalRecord(record);
+  if (record.date) registerDailyForm(record.date);
+  scheduleRealtimeRender();
+}
+
+function applyRealtimeLock(payload) {
+  const row = payload.eventType === 'DELETE' ? payload.old : payload.new;
+  if (!row) return;
+  const date = String(row.date || '').slice(0, 10);
+  if (payload.eventType === 'DELETE') {
+    state.locks = state.locks.filter((lock) => lock.id !== row.id
+      && !(date && lock.date === date && lock.shift === row.shift));
+  } else {
+    const lock = {
+      id: row.id,
+      key: `${date}:${row.shift}`,
+      date,
+      shift: row.shift,
+      lockedAt: row.locked_at,
+      reason: row.reason,
+    };
+    state.locks = state.locks.filter((item) => item.key !== lock.key).concat(lock);
+  }
+  scheduleRealtimeRender();
+}
+
+function applyRealtimeDailyForm(payload) {
+  const row = payload.eventType === 'DELETE' ? payload.old : payload.new;
+  const date = String(row?.date || '').slice(0, 10);
+  if (!date) return;
+  if (payload.eventType === 'DELETE') {
+    state.dailyForms = state.dailyForms.filter((form) => form.date !== date);
+  } else {
+    const form = { date, createdAt: row.created_at };
+    state.dailyForms = state.dailyForms.filter((item) => item.date !== date).concat(form);
+  }
+  scheduleRealtimeRender();
+}
+
+async function startRealtime() {
+  if (realtimeChannel) return;
+  if (realtimeStartPromise) return realtimeStartPromise;
+  const url = String(window.LAUNDRY_SUPABASE_URL || '').trim();
+  const anonKey = String(window.LAUNDRY_SUPABASE_ANON_KEY || '').trim();
+  if (!url || !anonKey) return;
+  realtimeStartPromise = (async () => {
+    try {
+      const { createClient } = await import('https://esm.sh/@supabase/supabase-js@2.117.2');
+      supabaseClient ||= createClient(url, anonKey, { auth: { persistSession: false } });
+      realtimeChannel = supabaseClient
+        .channel('laundry-operational-changes')
+        .on('postgres_changes', { event: '*', schema: 'public', table: 'records' }, applyRealtimeRecord)
+        .on('postgres_changes', { event: '*', schema: 'public', table: 'locks' }, applyRealtimeLock)
+        .on('postgres_changes', { event: '*', schema: 'public', table: 'daily_forms' }, applyRealtimeDailyForm)
+        .subscribe((status) => {
+          state.realtimeConnected = status === 'SUBSCRIBED';
+          renderStatusOnly();
+          if (status === 'SUBSCRIBED') hydrateFromServer();
+        });
+    } catch {
+      state.realtimeConnected = false;
+    }
+  })();
+  try {
+    await realtimeStartPromise;
+  } finally {
+    realtimeStartPromise = null;
+  }
+}
+
 window.addEventListener('online', () => {
   state.online = true;
-  retrySync();
+  state.apiConnected = false;
+  clearTimeout(mutationRetryTimer);
+  clearTimeout(serverReconnectTimer);
+  mutationRetryDelay = 1000;
+  serverReconnectDelay = 1000;
+  renderStatusOnly();
+  startRealtime();
+  hydrateFromServer();
 });
 
 window.addEventListener('offline', () => {
   state.online = false;
+  state.apiConnected = false;
   render();
+});
+
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden && navigator.onLine) {
+    startRealtime();
+    hydrateFromServer();
+  }
+});
+
+window.addEventListener('pagehide', () => {
+  if (realtimeChannel && supabaseClient) {
+    supabaseClient.removeChannel(realtimeChannel);
+    realtimeChannel = null;
+  }
+});
+
+window.addEventListener('pageshow', () => {
+  if (navigator.onLine) {
+    startRealtime();
+    hydrateFromServer();
+  }
 });
 
 if ('serviceWorker' in navigator) {
@@ -970,4 +1175,5 @@ if ('serviceWorker' in navigator) {
 
 loadLocal();
 render();
+startRealtime();
 hydrateFromServer();

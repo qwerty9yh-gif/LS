@@ -9,14 +9,8 @@
  * the documented defaults. Usage: npm run seed:user
  */
 import 'dotenv/config';
-import pg from 'pg';
-import { readFile } from 'node:fs/promises';
-import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { PrismaClient } from '@prisma/client';
 import { hashPassword } from './auth.js';
-
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const schemaPath = path.join(__dirname, 'schema.sql');
 
 const EMAIL = (process.env.UNIVERSAL_EMAIL || 'qwerty@gmail.com').toLowerCase();
 const PASSWORD = process.env.UNIVERSAL_PASSWORD || '123456789';
@@ -27,40 +21,27 @@ if (!connectionString) {
   process.exit(1);
 }
 
-const pool = new pg.Pool({ connectionString, max: 1 });
-const client = await pool.connect();
+const prisma = new PrismaClient({ datasources: { db: { url: connectionString } } });
 
 try {
-  console.log('→ Applying schema...');
-  await client.query(await readFile(schemaPath, 'utf8'));
-  console.log('  Schema applied.');
+  const { removed, count, emails } = await prisma.$transaction(async (tx) => {
+    const removed = await tx.user.deleteMany({ where: { email: { not: EMAIL } } });
+    await tx.user.upsert({
+      where: { email: EMAIL },
+      create: { email: EMAIL, passwordHash: hashPassword(PASSWORD) },
+      update: { passwordHash: hashPassword(PASSWORD), updatedAt: new Date() },
+    });
+    const count = await tx.user.count();
+    const users = await tx.user.findMany({ select: { email: true }, orderBy: { createdAt: 'asc' } });
+    return { removed, count, emails: users.map((user) => user.email).join(', ') || '-' };
+  });
 
-  await client.query('BEGIN');
-
-  // 1. Remove any other accounts (the system has exactly one shared login).
-  const removed = await client.query('DELETE FROM users WHERE email <> $1', [EMAIL]);
-
-  // 2. Upsert the universal account.
-  await client.query(
-    `INSERT INTO users (email, password_hash)
-     VALUES ($1, $2)
-     ON CONFLICT (email) DO UPDATE SET
-       password_hash = EXCLUDED.password_hash,
-       updated_at = NOW()`,
-    [EMAIL, hashPassword(PASSWORD)]
-  );
-
-  const count = await client.query('SELECT COUNT(*) AS c, COALESCE(string_agg(email, \', \'), \'-\') AS emails FROM users');
-  await client.query('COMMIT');
-
-  console.log(`→ Removed ${removed.rowCount} other account(s).`);
+  console.log(`→ Removed ${removed.count} other account(s).`);
   console.log(`✓ Universal account ready: ${EMAIL}`);
-  console.log(`✓ Users in database: ${count.rows[0].c} (${count.rows[0].emails})`);
+  console.log(`✓ Users in database: ${count} (${emails})`);
 } catch (err) {
-  await client.query('ROLLBACK').catch(() => {});
   console.error('✖ Seeding failed:', err.message);
   process.exit(1);
 } finally {
-  client.release();
-  await pool.end();
+  await prisma.$disconnect();
 }
