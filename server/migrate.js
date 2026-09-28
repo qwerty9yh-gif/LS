@@ -21,6 +21,97 @@ const dataDir = path.join(rootDir, 'data');
 const dbPath = path.join(dataDir, 'records.json');
 const schemaPath = path.join(__dirname, 'schema.sql');
 
+/** Split SQL on semicolons, ignoring those inside quotes/comments/$$ blocks. */
+function splitSchemaStatements(sql) {
+  const statements = [];
+  let current = '';
+  let dollarTag = null;
+  let inSingle = false;
+  let inDouble = false;
+  let inLineComment = false;
+  let inBlockComment = false;
+  for (let i = 0; i < sql.length; i += 1) {
+    const ch = sql[i];
+    const next = sql[i + 1];
+    if (inLineComment) {
+      current += ch;
+      if (ch === '\n') inLineComment = false;
+      continue;
+    }
+    if (inBlockComment) {
+      current += ch;
+      if (ch === '*' && next === '/') {
+        current += next;
+        i += 1;
+        inBlockComment = false;
+      }
+      continue;
+    }
+    if (dollarTag) {
+      current += ch;
+      if (ch === '$' && sql.startsWith(dollarTag, i)) {
+        current += dollarTag.slice(1);
+        i += dollarTag.length - 1;
+        dollarTag = null;
+      }
+      continue;
+    }
+    if (inSingle) {
+      current += ch;
+      if (ch === "'" && next === "'") {
+        current += next;
+        i += 1;
+      } else if (ch === "'") {
+        inSingle = false;
+      }
+      continue;
+    }
+    if (inDouble) {
+      current += ch;
+      if (ch === '"') inDouble = false;
+      continue;
+    }
+    if (ch === '-' && next === '-') {
+      inLineComment = true;
+      current += ch;
+      continue;
+    }
+    if (ch === '/' && next === '*') {
+      inBlockComment = true;
+      current += ch + next;
+      i += 1;
+      continue;
+    }
+    if (ch === "'") {
+      inSingle = true;
+      current += ch;
+      continue;
+    }
+    if (ch === '"') {
+      inDouble = true;
+      current += ch;
+      continue;
+    }
+    if (ch === '$') {
+      const tagMatch = /^\$[A-Za-z_][A-Za-z0-9_]*\$|^\$\$/.exec(sql.slice(i, i + 32));
+      if (tagMatch) {
+        dollarTag = tagMatch[0];
+        current += dollarTag;
+        i += dollarTag.length - 1;
+        continue;
+      }
+    }
+    if (ch === ';') {
+      if (current.trim()) statements.push(current.trim());
+      current = '';
+      continue;
+    }
+    current += ch;
+  }
+  if (current.trim()) statements.push(current.trim());
+  return statements.filter((stmt) => stmt && !/^--/.test(stmt));
+}
+
 async function main() {
   const connectionString = process.env.DIRECT_URL || process.env.DATABASE_URL;
   if (!connectionString) {
@@ -33,10 +124,23 @@ async function main() {
   const prisma = new PrismaClient({ datasources: { db: { url: connectionString } } });
 
   try {
-    // 1. Ensure schema exists
+    // 1. Ensure schema exists. Statements run one-by-one on this dedicated
+    // client (never one multi-statement query) so a mid-file failure cannot
+    // silently leave `records` without its `color` column on the pooler.
     console.log('→ Applying schema...');
     const schema = await readFile(schemaPath, 'utf8');
-    await client.query(schema);
+    for (const stmt of splitSchemaStatements(schema)) {
+      try {
+        await client.query(stmt);
+      } catch (stmtErr) {
+        const code = stmtErr?.code;
+        const msg = stmtErr?.message || '';
+        if (code === '42P07' || code === '42710' || code === '42701' || /already exists/i.test(msg)) {
+          continue;
+        }
+        throw new Error(`Schema statement failed [${code || 'no-code'}]: ${msg}\nStatement: ${String(stmt).slice(0, 160)}`);
+      }
+    }
     console.log('  Schema applied.');
 
     // 2. Check for legacy JSON data

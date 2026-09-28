@@ -83,7 +83,12 @@ const pool = new pg.Pool({
   idleTimeoutMillis: 30000,
   connectionTimeoutMillis: 15000,
 });
-const prisma = new PrismaClient();
+// Force Prisma onto the session-mode connection too: the transaction-mode
+// pooler (6543, pgbouncer=true) hangs on some transactional writes, and an
+// explicit url beats whatever DATABASE_URL the generated client defaults to.
+const prisma = new PrismaClient({
+  datasources: { db: { url: process.env.DIRECT_URL || process.env.DATABASE_URL } },
+});
 
 pool.on('error', (err) => {
   // 'error' on an idle client would otherwise crash the process.
@@ -92,18 +97,189 @@ pool.on('error', (err) => {
 
 // An unhandled rejection (e.g. a background Google-Sheets export failing
 // after the HTTP response was already sent) must never take the server down.
+// Log the full stack + code so the next database mismatch is diagnosable
+// instead of a bare repeated message.
 process.on('unhandledRejection', (err) => {
   console.error('Unhandled promise rejection:', err?.message || err);
+  if (err?.code) console.error('  code:', err.code);
+  if (err?.stack) console.error(err.stack);
 });
 
+// Wrap async route handlers so a thrown error (e.g. DB read failing before
+// the schema self-heal has completed) becomes a 500 JSON response instead of
+// an unhandled rejection that leaves the client hanging and retries forever.
+const asyncHandler = (fn) => (req, res, next) => {
+  Promise.resolve(fn(req, res, next)).catch(next);
+};
+
 // ─── Schema initialisation ───────────────────────────────────────────────────
+// NOTE: schema.sql holds ~20 statements (DO $$ blocks, CREATE TABLE/INDEX,
+// ALTER TABLE ... ADD COLUMN). It must NOT be sent as one multi-statement
+// pool.query(): on the Supabase transaction-mode pooler (port 6543) such a
+// query can fail/hang part-way, leaving an old `records` table without the
+// `color`/`row_key`/`signature` columns. Every later read/write then throws
+// `column "color" does not exist` on every poll. So: split into single
+// statements, run them one-by-one on a dedicated client, then verify the
+// required columns exist before marking the schema ready.
 let schemaReady = false;
+let schemaPromise = null;
+
+/** Split SQL on semicolons, ignoring those inside quotes/comments/$$ blocks. */
+function splitSqlStatements(sql) {
+  const statements = [];
+  let current = '';
+  let dollarTag = null;
+  let inSingle = false;
+  let inDouble = false;
+  let inLineComment = false;
+  let inBlockComment = false;
+  for (let i = 0; i < sql.length; i += 1) {
+    const ch = sql[i];
+    const next = sql[i + 1];
+    if (inLineComment) {
+      current += ch;
+      if (ch === '\n') inLineComment = false;
+      continue;
+    }
+    if (inBlockComment) {
+      current += ch;
+      if (ch === '*' && next === '/') {
+        current += next;
+        i += 1;
+        inBlockComment = false;
+      }
+      continue;
+    }
+    if (dollarTag) {
+      current += ch;
+      if (ch === '$' && sql.startsWith(dollarTag, i)) {
+        current += dollarTag.slice(1);
+        i += dollarTag.length - 1;
+        dollarTag = null;
+      }
+      continue;
+    }
+    if (inSingle) {
+      current += ch;
+      if (ch === "'" && next === "'") {
+        current += next;
+        i += 1;
+      } else if (ch === "'") {
+        inSingle = false;
+      }
+      continue;
+    }
+    if (inDouble) {
+      current += ch;
+      if (ch === '"') inDouble = false;
+      continue;
+    }
+    if (ch === '-' && next === '-') {
+      inLineComment = true;
+      current += ch;
+      continue;
+    }
+    if (ch === '/' && next === '*') {
+      inBlockComment = true;
+      current += ch + next;
+      i += 1;
+      continue;
+    }
+    if (ch === "'") {
+      inSingle = true;
+      current += ch;
+      continue;
+    }
+    if (ch === '"') {
+      inDouble = true;
+      current += ch;
+      continue;
+    }
+    if (ch === '$') {
+      const tagMatch = /^\$[A-Za-z_][A-Za-z0-9_]*\$|^\$\$/.exec(sql.slice(i, i + 32));
+      if (tagMatch) {
+        dollarTag = tagMatch[0];
+        current += dollarTag;
+        i += dollarTag.length - 1;
+        continue;
+      }
+    }
+    if (ch === ';') {
+      if (current.trim()) statements.push(current.trim());
+      current = '';
+      continue;
+    }
+    current += ch;
+  }
+  if (current.trim()) statements.push(current.trim());
+  return statements;
+}
+
+const REQUIRED_RECORD_COLUMNS = ['id', 'date', 'shift', 'material', 'color', 'row_key', 'quantity'];
+
+async function verifyRecordColumns(client) {
+  const res = await client.query(
+    `SELECT column_name FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'records'`
+  );
+  const present = new Set(res.rows.map((row) => row.column_name));
+  const missing = REQUIRED_RECORD_COLUMNS.filter((col) => !present.has(col));
+  if (missing.length === 0) return;
+  const heal = {
+    color: `ALTER TABLE records ADD COLUMN IF NOT EXISTS color TEXT NOT NULL DEFAULT ''`,
+    row_key: `ALTER TABLE records ADD COLUMN IF NOT EXISTS row_key TEXT NOT NULL DEFAULT ''`,
+    signature: `ALTER TABLE records ADD COLUMN IF NOT EXISTS signature TEXT NOT NULL DEFAULT ''`,
+  };
+  for (const col of missing) {
+    if (heal[col]) await client.query(heal[col]);
+  }
+  const retry = await client.query(
+    `SELECT column_name FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'records'`
+  );
+  const presentAfter = new Set(retry.rows.map((row) => row.column_name));
+  const stillMissing = REQUIRED_RECORD_COLUMNS.filter((col) => !presentAfter.has(col));
+  if (stillMissing.length > 0) {
+    throw new Error(
+      `PostgreSQL schema mismatch: public.records is missing column(s) ${stillMissing.join(', ')}. ` +
+      `Run server/schema.sql against the session-mode (DIRECT_URL) database, then restart.`
+    );
+  }
+}
+
+async function applySchema() {
+  const schema = await readFile(schemaPath, 'utf8');
+  const statements = splitSqlStatements(schema).filter((stmt) => stmt && !/^--/.test(stmt));
+  const client = await pool.connect();
+  try {
+    for (const stmt of statements) {
+      try {
+        await client.query(stmt);
+      } catch (stmtErr) {
+        const code = stmtErr?.code;
+        const msg = stmtErr?.message || '';
+        if (code === '42P07' || code === '42710' || code === '42701' || /already exists/i.test(msg)) {
+          continue;
+        }
+        throw new Error(`Schema statement failed [${code || 'no-code'}]: ${msg}\nStatement: ${stmt.slice(0, 160)}`);
+      }
+    }
+    await verifyRecordColumns(client);
+  } finally {
+    client.release();
+  }
+}
 
 async function ensureSchema() {
   if (schemaReady || !hasDb()) return;
-  const schema = await readFile(schemaPath, 'utf8');
-  await pool.query(schema);
-  schemaReady = true;
+  if (!schemaPromise) {
+    schemaPromise = applySchema().then(() => {
+      schemaReady = true;
+      schemaPromise = null;
+    }).catch((err) => {
+      schemaPromise = null;
+      throw err;
+    });
+  }
+  return schemaPromise;
 }
 
 // ─── Field mapping: DB snake_case → API camelCase ────────────────────────────
@@ -585,7 +761,7 @@ async function mergeGoogleRecordsIntoPostgres(localRecords, remoteRecords, synce
 // ─── Authentication: single universal account ────────────────────────────────
 // The whole application shares ONE seeded login account (server/seed-user.js).
 // No registration, no profiles, no password reset, no device/IP tracking.
-app.post('/api/auth/login', async (req, res) => {
+app.post('/api/auth/login', asyncHandler(async (req, res) => {
   const email = cleanText(req.body.email).toLowerCase();
   const password = String(req.body.password || '');
   if (!email || !password) {
@@ -611,14 +787,14 @@ app.post('/api/auth/login', async (req, res) => {
   } catch (err) {
     res.status(500).json({ ok: false, error: 'Sign in failed on the server.' });
   }
-});
+}));
 
-app.get('/api/records', async (_req, res) => {
+app.get('/api/records', asyncHandler(async (_req, res) => {
   const db = await readDb();
   res.json(db);
-});
+}));
 
-app.put('/api/records', async (req, res) => {
+app.put('/api/records', asyncHandler(async (req, res) => {
   try {
     const incoming = Array.isArray(req.body.records) ? req.body.records : [];
     const cleaned = incoming.map(cleanRecord);
@@ -723,9 +899,9 @@ app.put('/api/records', async (req, res) => {
   } catch (error) {
     res.status(400).json({ ok: false, error: error.message });
   }
-});
+}));
 
-app.delete('/api/records/:id', async (req, res) => {
+app.delete('/api/records/:id', asyncHandler(async (req, res) => {
   if (hasDb()) {
     await ensureSchema();
     // Surgical delete: remove exactly one row by id. No snapshot rewrite,
@@ -739,9 +915,9 @@ app.delete('/api/records/:id', async (req, res) => {
   db.records = db.records.filter((record) => record.id !== req.params.id);
   await writeDb(db);
   res.json({ ok: true, deleted: before - db.records.length });
-});
+}));
 
-app.post('/api/locks', async (req, res) => {
+app.post('/api/locks', asyncHandler(async (req, res) => {
   const date = cleanText(req.body.date);
   const shift = normalizeShift(req.body.shift);
   if (!isValidFormDate(date) || !shifts.has(shift)) {
@@ -766,14 +942,14 @@ app.post('/api/locks', async (req, res) => {
     await writeDb(db);
   }
   res.json({ ok: true, locks: db.locks });
-});
+}));
 
 // ─── Daily forms: one independent record per calendar day ──────────────────
 // POST /api/daily-forms { date } → 201 created | 200 already exists
 // (frontend shows "A form already exists for this date." with Open/Cancel).
 // An explicit row is stored even when the form has zero entries, so empty
 // days exist, cannot be duplicated, and appear in Daily Records / navigation.
-app.post('/api/daily-forms', async (req, res) => {
+app.post('/api/daily-forms', asyncHandler(async (req, res) => {
   const date = cleanText(req.body?.date);
   if (!isValidFormDate(date)) {
     res.status(400).json({ ok: false, error: 'A valid date is required.' });
@@ -808,14 +984,14 @@ app.post('/api/daily-forms', async (req, res) => {
     await writeDb(db);
   }
   res.status(201).json({ ok: true, exists: false, form: { date, createdAt } });
-});
+}));
 
-app.get('/api/daily-forms', async (_req, res) => {
+app.get('/api/daily-forms', asyncHandler(async (_req, res) => {
   const db = await readDb();
   res.json({ ok: true, forms: db.dailyForms || [] });
-});
+}));
 
-app.post('/api/sync/retry', async (_req, res) => {
+app.post('/api/sync/retry', asyncHandler(async (_req, res) => {
   const db = await readDb();
   const pending = db.records.filter((record) => record.syncStatus !== 'synced');
   if (hasDb()) {
@@ -854,9 +1030,9 @@ app.post('/api/sync/retry', async (_req, res) => {
     await writeDb(db);
     res.status(202).json({ ok: true, sync: { status: 'pending', error: error.message }, records: db.records });
   }
-});
+}));
 
-app.post('/api/sync/pull', async (_req, res) => {
+app.post('/api/sync/pull', asyncHandler(async (_req, res) => {
   const db = await readDb();
   if (hasDb()) {
     try {
@@ -888,10 +1064,20 @@ app.post('/api/sync/pull', async (_req, res) => {
     await writeDb(db);
     res.status(202).json({ ok: true, sync: { status: 'pending', error: error.message }, records: db.records });
   }
-});
+}));
 
 app.get('*', (_req, res) => {
   res.sendFile(path.join(publicDir, 'index.html'));
+});
+
+// Central error handler: always answer JSON so the frontend never hangs on
+// a rejected readDb()/writeDb() (previously: unhandled rejection + retry loop).
+// eslint-disable-next-line no-unused-vars
+app.use((err, _req, res, _next) => {
+  console.error('API error:', err?.message || err);
+  if (err?.stack) console.error(err.stack);
+  if (res.headersSent) return;
+  res.status(500).json({ ok: false, error: err?.message || 'Server error.' });
 });
 
 ensureSchema().then(() => {
