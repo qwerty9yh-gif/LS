@@ -50,13 +50,22 @@ async function audit(label, url) {
         (extra.length ? ` | extra: ${extra.join(', ')}` : ''));
     }
 
-    for (const t of ['records', 'locks', 'daily_forms', 'sync_events', 'users']) {
+    for (const t of ['records', 'locks', 'daily_forms', 'shift_orders', 'sync_events', 'users']) {
       try {
         const r = await pool.query(`SELECT COUNT(*)::int AS c FROM public.${t}`);
         console.log(`rows ${t} = ${r.rows[0].c}`);
       } catch (err) {
         console.log(`rows ${t} = ERROR ${err.message}`);
       }
+    }
+
+    try {
+      const order = await pool.query(
+        `SELECT shift, display_order FROM public.shift_orders ORDER BY display_order, shift`,
+      );
+      console.log('shift order:', JSON.stringify(order.rows));
+    } catch (err) {
+      console.log('shift order: ERROR', err.message);
     }
 
     try {

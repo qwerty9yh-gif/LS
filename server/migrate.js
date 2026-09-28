@@ -189,19 +189,15 @@ async function main() {
 
     const migrationResult = await prisma.$transaction(async (tx) => {
       let migratedRecords = 0;
-      let updatedRecords = 0;
+      let preservedRecords = 0;
       let migratedLocks = 0;
       let migratedForms = 0;
       let migratedSyncEvents = 0;
 
-      for (const rec of records) {
-        const existing = await tx.record.findUnique({ where: { id: rec.id }, select: { id: true } });
-        const date = new Date(`${rec.date}T00:00:00.000Z`);
-        await tx.record.upsert({
-          where: { id: rec.id },
-          create: {
+      const recordInsert = await tx.record.createMany({
+        data: records.map((rec) => ({
             id: rec.id,
-            date,
+            date: new Date(`${rec.date}T00:00:00.000Z`),
             shift: rec.shift,
             material: rec.material || '',
             color: rec.color || '',
@@ -216,46 +212,22 @@ async function main() {
             createdAt: rec.createdAt ? new Date(rec.createdAt) : new Date(),
             updatedAt: rec.updatedAt ? new Date(rec.updatedAt) : new Date(),
             syncedAt: rec.syncedAt ? new Date(rec.syncedAt) : null,
-          },
-          update: {
-            date,
-            shift: rec.shift,
-            material: rec.material || '',
-            color: rec.color || '',
-            rowKey: rec.rowKey || '',
-            quantity: rec.quantity === '' || rec.quantity === null || rec.quantity === undefined ? null : Number(rec.quantity),
-            laundryPersonnel: rec.laundryPersonnel || '',
-            verifiedBy: rec.verifiedBy || '',
-            signature: rec.signature || '',
-            status: rec.status || 'received',
-            syncStatus: rec.syncStatus || 'pending',
-            syncError: rec.syncError || '',
-            createdAt: rec.createdAt ? new Date(rec.createdAt) : new Date(),
-            updatedAt: rec.updatedAt ? new Date(rec.updatedAt) : new Date(),
-            syncedAt: rec.syncedAt ? new Date(rec.syncedAt) : null,
-          },
-        });
-        if (existing) updatedRecords++;
-        else migratedRecords++;
-      }
+        })),
+        skipDuplicates: true,
+      });
+      migratedRecords = recordInsert.count;
+      preservedRecords = records.length - migratedRecords;
 
-      for (const lock of locks) {
-        const date = new Date(`${lock.date}T00:00:00.000Z`);
-        await tx.lock.upsert({
-          where: { date_shift: { date, shift: lock.shift } },
-          create: {
-            date,
+      const lockInsert = await tx.lock.createMany({
+        data: locks.map((lock) => ({
+            date: new Date(`${lock.date}T00:00:00.000Z`),
             shift: lock.shift,
             lockedAt: lock.lockedAt ? new Date(lock.lockedAt) : new Date(),
             reason: lock.reason || 'Shift closed',
-          },
-          update: {
-            lockedAt: lock.lockedAt ? new Date(lock.lockedAt) : new Date(),
-            reason: lock.reason || 'Shift closed',
-          },
-        });
-        migratedLocks++;
-      }
+        })),
+        skipDuplicates: true,
+      });
+      migratedLocks = lockInsert.count;
 
       for (const form of dailyForms) {
         if (!/^\d{4}-\d{2}-\d{2}$/.test(String(form.date || ''))) continue;
@@ -280,12 +252,12 @@ async function main() {
         migratedSyncEvents++;
       }
 
-      return { migratedRecords, updatedRecords, migratedLocks, migratedForms, migratedSyncEvents };
+      return { migratedRecords, preservedRecords, migratedLocks, migratedForms, migratedSyncEvents };
     }, { maxWait: 10000, timeout: 120000 });
 
-    const { migratedRecords, updatedRecords, migratedLocks, migratedForms, migratedSyncEvents } = migrationResult;
+    const { migratedRecords, preservedRecords, migratedLocks, migratedForms, migratedSyncEvents } = migrationResult;
 
-    console.log(`→ Records: ${migratedRecords} new, ${updatedRecords} updated (out of ${records.length} total)`);
+    console.log(`→ Records: ${migratedRecords} new, ${preservedRecords} existing/duplicate rows preserved (out of ${records.length} total)`);
     console.log(`→ Locks: ${migratedLocks} migrated`);
     console.log(`→ Daily forms: ${migratedForms} migrated`);
     console.log(`→ Sync events: ${migratedSyncEvents} migrated`);

@@ -23,7 +23,7 @@ async function main() {
   const pool = new pg.Pool({ connectionString, max: 1, connectionTimeoutMillis: 15000 });
   try {
     const snapshot = { exportedAt: new Date().toISOString(), tables: {} };
-    for (const table of ['records', 'locks', 'daily_forms', 'sync_events', 'users']) {
+    for (const table of ['records', 'locks', 'daily_forms', 'shift_orders', 'sync_events', 'users']) {
       try {
         const res = await pool.query(`SELECT * FROM public.${table}`);
         snapshot.tables[table] = res.rows;

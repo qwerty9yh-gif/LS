@@ -11,6 +11,7 @@
     "db:export": "node server/db-export.js",
     "prisma:generate": "prisma generate",
     "prisma:validate": "prisma validate",
+    "prisma:deploy": "prisma migrate deploy",
     "test": "node --test tests/*.test.js",
     "db:drop-trigger": "node server/drop-trigger.js",
     "db:clear": "node server/clear-data.js",

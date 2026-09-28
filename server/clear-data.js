@@ -14,6 +14,19 @@ if (!connectionString) {
   process.exit(1);
 }
 
+const isSupabase = (() => {
+  try {
+    const hostname = new URL(connectionString).hostname;
+    return hostname.endsWith('.supabase.co') || hostname.endsWith('.supabase.com');
+  } catch {
+    return false;
+  }
+})();
+if (process.env.NODE_ENV === 'production' || isSupabase || process.env.ALLOW_LOCAL_DB_CLEAR !== 'true') {
+  console.error('✖ Data clearing is disabled for production and Supabase databases.');
+  process.exit(1);
+}
+
 const prisma = new PrismaClient({ datasources: { db: { url: connectionString } } });
 
 try {

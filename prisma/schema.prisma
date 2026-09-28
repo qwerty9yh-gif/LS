@@ -39,7 +39,7 @@ model Record {
   material         String       @default("")
   color            String       @default("")
   rowKey           String       @default("") @map("row_key")
-  quantity         Int?
+  quantity         Int?         @default(0)
   laundryPersonnel String       @default("") @map("laundry_personnel")
   verifiedBy       String       @default("") @map("verified_by")
   signature        String       @default("")
@@ -50,12 +50,12 @@ model Record {
   updatedAt        DateTime     @default(now()) @map("updated_at") @db.Timestamptz(6)
   syncedAt         DateTime?    @map("synced_at") @db.Timestamptz(6)
 
-  @@index([date])
-  @@index([shift])
-  @@index([date, shift])
-  @@index([date, material, color])
-  @@index([syncStatus])
-  @@index([status])
+  @@index([date], map: "idx_records_date")
+  @@index([shift], map: "idx_records_shift")
+  @@index([date, shift], map: "idx_records_date_shift")
+  @@index([date, material, color], map: "idx_records_monthly")
+  @@index([syncStatus], map: "idx_records_sync_status")
+  @@index([status], map: "idx_records_status")
   @@map("records")
 }
 
@@ -67,7 +67,7 @@ model Lock {
   reason   String   @default("Shift closed")
 
   @@unique([date, shift])
-  @@index([date, shift])
+  @@index([date, shift], map: "idx_locks_date_shift")
   @@map("locks")
 }
 
@@ -78,6 +78,15 @@ model DailyForm {
   @@map("daily_forms")
 }
 
+model ShiftOrder {
+  shift        Shift    @id
+  displayOrder Int      @map("display_order")
+  updatedAt    DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@index([displayOrder], map: "idx_shift_orders_display_order")
+  @@map("shift_orders")
+}
+
 model SyncEvent {
   id     Int      @id @default(autoincrement())
   at     DateTime @default(now()) @db.Timestamptz(6)
@@ -85,18 +94,18 @@ model SyncEvent {
   error  String?
   detail Json?
 
-  @@index([at(sort: Desc)])
+  @@index([at(sort: Desc)], map: "idx_sync_events_at")
   @@map("sync_events")
 }
 
 model User {
-  id           String    @id @default(uuid()) @db.Uuid
+  id           String    @id @default(dbgenerated("uuid_generate_v4()")) @db.Uuid
   email        String    @unique
   passwordHash String    @map("password_hash")
   createdAt    DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt    DateTime  @default(now()) @map("updated_at") @db.Timestamptz(6)
   lastLoginAt  DateTime? @map("last_login_at") @db.Timestamptz(6)
 
-  @@index([email])
+  @@index([email], map: "idx_users_email")
   @@map("users")
 }

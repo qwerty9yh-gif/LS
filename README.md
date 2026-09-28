@@ -11,12 +11,24 @@ The shift sheet keeps the required primary spreadsheet columns:
 - QUANTITY
 - LAUNDRY PERSONNEL
 - VERIFIED BY
-
 ## Database
+The UI's persisted data maps to these PostgreSQL tables:
 
-The application uses **PostgreSQL** as its single source of truth.  The database
+- **`records`** — laundry rows with stable text IDs, date, shift, material,
+  color, quantity, personnel, verification, signature, status and timestamps
+- **`locks`** — shift-level locks
+- **`daily_forms`** — explicit daily forms, including empty days
+- **`shift_orders`** — the shared display order for all four shifts
+- **`sync_events`** — append-only sync history
+- **`users`** — login accounts; password hashes are never sent to clients
+
+Monthly tracking is calculated from records and does not need a separate table.
 schema lives in `server/schema.sql` and is applied automatically on server start.
 
+npm run prisma:deploy
+npm run prisma:deploy applies only checked-in additive migrations. It does not reset
+the database. The shift-order migration creates its table/index if missing and
+inserts defaults only for shifts that do not already have a saved order.
 ### Environment variables
 
 | Variable          | Required | Purpose                                      |
@@ -24,6 +36,8 @@ schema lives in `server/schema.sql` and is applied automatically on server start
 | `DATABASE_URL`    | yes      | PostgreSQL connection string (transaction-mode pooler) |
 | `DIRECT_URL`      | no       | Session-mode PostgreSQL connection (used by `server/migrate.js`) |
 | `PORT`            | no       | HTTP port (default `4173`)                   |
+to `records`, `locks`, `daily_forms`, and `shift_orders`; the UI refreshes from
+the API after a Realtime reconnect. To enable subscriptions, set
 
 If `DATABASE_URL` is not set, the server falls back to the legacy JSON file
 (`data/records.json`) so the app still works in development.
@@ -40,12 +54,16 @@ The schema is defined in `server/schema.sql` and includes:
 Runtime application data writes use Prisma models mapped to these existing
 PostgreSQL tables. Generate and validate the Prisma client with:
 
+This imports missing records and locks, then idempotently maps daily forms and
+sync events. Existing record IDs, locks, and user accounts are preserved rather
+than overwritten. The script reports counts for verification.
 ```powershell
 npm run prisma:generate
 npm run prisma:validate
 ```
 
-### Cross-device live sync
+npm run db:clear    # local development only; requires ALLOW_LOCAL_DB_CLEAR=true
+npm run seed:user   # adds the universal account if missing; retains other users
 
 The browser keeps ordered pending mutations in local storage and replays them
 automatically when connectivity returns. Supabase Realtime listens for changes

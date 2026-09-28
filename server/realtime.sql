@@ -8,7 +8,7 @@ BEGIN
     RAISE EXCEPTION 'Supabase publication supabase_realtime does not exist';
   END IF;
 
-  FOREACH table_name IN ARRAY ARRAY['records', 'locks', 'daily_forms'] LOOP
+  FOREACH table_name IN ARRAY ARRAY['records', 'locks', 'daily_forms', 'shift_orders'] LOOP
     IF NOT EXISTS (
       SELECT 1 FROM pg_publication_tables
       WHERE pubname = 'supabase_realtime'
@@ -21,5 +21,5 @@ BEGIN
 END
 $$;
 
-GRANT SELECT ON TABLE public.records, public.locks, public.daily_forms TO anon, authenticated;
+GRANT SELECT ON TABLE public.records, public.locks, public.daily_forms, public.shift_orders TO anon, authenticated;
 ALTER TABLE public.locks REPLICA IDENTITY FULL;

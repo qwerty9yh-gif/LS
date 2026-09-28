@@ -3,7 +3,7 @@
  *
  * - Applies the schema first (creates the users table if missing).
  * - Upserts the universal account with a scrypt-hashed password.
- * - Deletes ANY other user rows, guaranteeing exactly one account.
+ * - Leaves existing user accounts and credentials untouched.
  *
  * Credentials come from UNIVERSAL_EMAIL / UNIVERSAL_PASSWORD env vars, with
  * the documented defaults. Usage: npm run seed:user
@@ -24,19 +24,17 @@ if (!connectionString) {
 const prisma = new PrismaClient({ datasources: { db: { url: connectionString } } });
 
 try {
-  const { removed, count, emails } = await prisma.$transaction(async (tx) => {
-    const removed = await tx.user.deleteMany({ where: { email: { not: EMAIL } } });
+  const { count, emails } = await prisma.$transaction(async (tx) => {
     await tx.user.upsert({
       where: { email: EMAIL },
       create: { email: EMAIL, passwordHash: hashPassword(PASSWORD) },
-      update: { passwordHash: hashPassword(PASSWORD), updatedAt: new Date() },
+      update: {},
     });
     const count = await tx.user.count();
     const users = await tx.user.findMany({ select: { email: true }, orderBy: { createdAt: 'asc' } });
-    return { removed, count, emails: users.map((user) => user.email).join(', ') || '-' };
+    return { count, emails: users.map((user) => user.email).join(', ') || '-' };
   });
 
-  console.log(`→ Removed ${removed.count} other account(s).`);
   console.log(`✓ Universal account ready: ${EMAIL}`);
   console.log(`✓ Users in database: ${count} (${emails})`);
 } catch (err) {

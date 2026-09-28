@@ -79,6 +79,14 @@ input:focus, select:focus { border-color: var(--accent); outline: 2px solid rgba
 .register-title h2 { text-transform: uppercase; font-size: 18px; }
 
 .shift-block { margin-bottom: 12px; }
+.shift-heading-content { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.shift-order-controls { display: inline-flex; align-items: center; gap: 4px; flex-shrink: 0; }
+.shift-order-controls > button { display: inline-grid; place-items: center; width: 30px; min-width: 30px; height: 30px; min-height: 30px; padding: 0; }
+.shift-drag-handle { border: 1px solid var(--line-soft); border-radius: 6px; background: var(--surface); color: var(--ink); font-size: 17px; line-height: 1; touch-action: none; user-select: none; cursor: grab; }
+.shift-drag-handle:active { cursor: grabbing; }
+.shift-block.is-dragging { position: relative; z-index: 1; opacity: 0.78; }
+.shift-block.shift-drop-before { box-shadow: inset 0 3px 0 var(--accent); }
+.shift-block.shift-drop-after { box-shadow: inset 0 -3px 0 var(--accent); }
 .laundry-register, .overall-table, .records-table { width: 100%; border-collapse: collapse; table-layout: fixed; background: var(--surface); }
 .laundry-register { min-width: 1160px; }
 .date-col { width: 18%; }
@@ -150,6 +158,7 @@ input:focus, select:focus { border-color: var(--accent); outline: 2px solid rgba
   .register-title { margin-bottom: 5px; padding: 4px 6px; break-after: avoid; }
   .register-title h2 { font-size: 14px; }
   .shift-block { margin-bottom: 5px; break-inside: avoid; page-break-inside: avoid; }
+  .shift-order-controls { display: none !important; }
   .laundry-register, .overall-table { min-width: 0; width: 100%; font-size: 9px; }
   .laundry-register th, .laundry-register td, .overall-table th, .overall-table td { border-color: #111; padding: 2px 4px; }
   .laundry-register td { height: 18px; }

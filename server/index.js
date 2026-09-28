@@ -10,6 +10,7 @@ import { google } from 'googleapis';
 import { setTimeout as delay } from 'node:timers/promises';
 import { verifyPassword } from './auth.js';
 import { normalizeShift, formExists as formDateExists, isValidFormDate } from './forms.js';
+import { DEFAULT_SHIFT_ORDER, SHIFT_KEYS as ORDERABLE_SHIFT_KEYS, isCompleteShiftOrder, normalizeShiftOrder } from '../shift-order.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -264,7 +265,9 @@ async function applyStatement(client, stmt, { tolerateMissingColumn = false } = 
 
 async function applySchema() {
   const schema = await readFile(schemaPath, 'utf8');
-  const statements = splitSqlStatements(schema).filter((stmt) => stmt && !/^--/.test(stmt));
+  const statements = splitSqlStatements(schema)
+    .map((stmt) => stmt.replace(/^(?:\s+|--[^\n]*(?:\n|$)|\/\*[\s\S]*?\*\/)*/g, '').trim())
+    .filter(Boolean);
   // Apply CREATE/ALTER statements first, heal any missing column, and create
   // indexes LAST: an index may reference a column that only a later ALTER adds
   // (older public.records had no color/row_key/signature), and running it early
@@ -280,6 +283,11 @@ async function applySchema() {
   } finally {
     client.release();
   }
+  await prisma.$transaction(DEFAULT_SHIFT_ORDER.map((shift, index) => prisma.shiftOrder.upsert({
+    where: { shift },
+    create: { shift, displayOrder: index + 1 },
+    update: {},
+  })));
 }
 
 async function ensureSchema() {
@@ -362,16 +370,18 @@ async function readDb() {
   if (hasDb()) {
     await ensureSchema();
     // Prisma reads through the validated client (no SELECT *, no raw SQL).
-    const [records, locks, syncEvents, forms] = await Promise.all([
+    const [records, locks, syncEvents, forms, shiftOrderRows] = await Promise.all([
       prisma.record.findMany({ orderBy: [{ date: 'desc' }, { shift: 'asc' }, { material: 'asc' }, { rowKey: 'asc' }, { color: 'asc' }] }),
       prisma.lock.findMany({ orderBy: { lockedAt: 'desc' } }),
       prisma.syncEvent.findMany({ orderBy: { at: 'desc' }, take: 200 }),
       prisma.dailyForm.findMany({ orderBy: { date: 'desc' } }).catch(() => []),
+      prisma.shiftOrder.findMany({ orderBy: [{ displayOrder: 'asc' }, { shift: 'asc' }] }),
     ]);
     const db = {
       records: records.map(prismaRecordToApi),
       locks: locks.map(prismaLockToApi),
       syncEvents: syncEvents.map(prismaSyncEventToApi),
+      shiftOrder: normalizeShiftOrder(shiftOrderRows.map((row) => row.shift)),
       dailyForms: forms.map((row) => ({
         date: toDateOnly(row.date),
         createdAt: row.createdAt,
@@ -401,10 +411,11 @@ async function readDb() {
 async function readJsonDb() {
   if (!existsSync(dataDir)) await mkdir(dataDir, { recursive: true });
   if (!existsSync(dbPath)) {
-    await writeFile(dbPath, JSON.stringify({ records: [], locks: [], syncEvents: [], dailyForms: [] }, null, 2));
+    await writeFile(dbPath, JSON.stringify({ records: [], locks: [], syncEvents: [], dailyForms: [], shiftOrder: DEFAULT_SHIFT_ORDER }, null, 2));
   }
   const fallback = JSON.parse(await readFile(dbPath, 'utf8'));
   fallback.dailyForms = Array.isArray(fallback.dailyForms) ? fallback.dailyForms : [];
+  fallback.shiftOrder = normalizeShiftOrder(fallback.shiftOrder);
   const seenFallback = new Set(fallback.dailyForms.map((form) => form?.date).filter(Boolean));
   for (const record of fallback.records || []) {
     if (record?.date && !seenFallback.has(record.date)) {
@@ -433,12 +444,14 @@ function cleanRecord(input) {
   const quantity = rawQuantity === '' || rawQuantity === null || rawQuantity === undefined
     ? null
     : Number(rawQuantity);
+  const updatedAt = cleanText(input.updatedAt) || new Date().toISOString();
 
   if (!id) throw new Error('Record id is required.');
   if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) throw new Error('A valid date is required.');
   if (!shifts.has(shift)) throw new Error('A valid shift is required.');
   if (!statuses.has(status)) throw new Error('A valid status is required.');
   if (quantity !== null && (!Number.isFinite(quantity) || quantity < 0)) throw new Error('Quantity must be a positive number.');
+  if (Number.isNaN(new Date(updatedAt).getTime())) throw new Error('A valid updatedAt timestamp is required.');
 
   return {
     id,
@@ -455,7 +468,7 @@ function cleanRecord(input) {
     syncStatus: input.syncStatus || 'pending',
         syncError: input.syncError || '',
     createdAt: input.createdAt || new Date().toISOString(),
-    updatedAt: new Date().toISOString(),
+    updatedAt,
     syncedAt: input.syncedAt || null
   };
 }
@@ -743,20 +756,59 @@ app.get('/api/records', asyncHandler(async (_req, res) => {
   res.json(db);
 }));
 
+app.put('/api/shift-order', asyncHandler(async (req, res) => {
+  const order = req.body?.order;
+  if (!isCompleteShiftOrder(order)) {
+    res.status(400).json({ ok: false, error: 'Order must contain each of the four shifts exactly once.' });
+    return;
+  }
+
+  if (hasDb()) {
+    await ensureSchema();
+    await prisma.$transaction(async (tx) => {
+      for (const shift of ORDERABLE_SHIFT_KEYS) {
+        const displayOrder = order.indexOf(shift) + 1;
+        await tx.shiftOrder.upsert({
+          where: { shift },
+          create: { shift, displayOrder },
+          update: { displayOrder },
+        });
+      }
+    });
+    const saved = await prisma.shiftOrder.findMany({ orderBy: [{ displayOrder: 'asc' }, { shift: 'asc' }] });
+    res.json({ ok: true, order: normalizeShiftOrder(saved.map((row) => row.shift)) });
+    return;
+  }
+
+  const db = await readJsonDb();
+  db.shiftOrder = order;
+  await writeJsonDb(db);
+  res.json({ ok: true, order: db.shiftOrder });
+}));
+
 app.put('/api/records', asyncHandler(async (req, res) => {
   try {
     const incoming = Array.isArray(req.body.records) ? req.body.records : [];
-    const cleaned = incoming.map(cleanRecord);
+    const cleaned = incoming.map(cleanRecord).sort((a, b) => a.id.localeCompare(b.id));
     // Surgical upsert: touch ONLY the incoming ids. Never rewrite the whole
     // table from a snapshot — a snapshot would overwrite other writers'
     // updatedAt values and could resurrect just-deleted rows.
     let savedRecords = [];
+    let acceptedRecords = [];
     if (hasDb()) {
       await ensureSchema();
       const now = new Date().toISOString();
       savedRecords = await prisma.$transaction(async (tx) => {
         const committed = [];
+        acceptedRecords = [];
         for (const record of cleaned) {
+          await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtext(${record.id})) IS NULL AS locked`;
+          const existing = await tx.record.findUnique({ where: { id: record.id } });
+          const incomingUpdatedAt = new Date(record.updatedAt);
+          if (existing && incomingUpdatedAt.getTime() <= existing.updatedAt.getTime()) {
+            committed.push(prismaRecordToApi(existing));
+            continue;
+          }
           const date = new Date(`${record.date}T00:00:00.000Z`);
           const quantity = record.quantity === '' || record.quantity === null || record.quantity === undefined
             ? null
@@ -782,7 +834,7 @@ app.put('/api/records', asyncHandler(async (req, res) => {
               syncStatus: 'pending',
               syncError: '',
               createdAt: new Date(record.createdAt || now),
-              updatedAt: new Date(now),
+              updatedAt: incomingUpdatedAt,
               syncedAt: null,
             },
             update: {
@@ -796,12 +848,12 @@ app.put('/api/records', asyncHandler(async (req, res) => {
               verifiedBy: record.verifiedBy || '',
               signature: record.signature || '',
               status: record.status || 'received',
+              updatedAt: incomingUpdatedAt,
               syncStatus: 'pending',
               syncError: '',
               syncedAt: null,
             },
           });
-          await tx.$executeRaw`UPDATE records SET updated_at = clock_timestamp() WHERE id = ${record.id}`;
           await tx.dailyForm.upsert({
             where: { date },
             create: { date, createdAt: new Date(record.createdAt || now) },
@@ -809,6 +861,7 @@ app.put('/api/records', asyncHandler(async (req, res) => {
           });
           const refreshed = await tx.record.findUnique({ where: { id: record.id } });
           committed.push(prismaRecordToApi(refreshed || saved));
+          acceptedRecords.push(record);
         }
         return committed;
       });
@@ -866,10 +919,12 @@ app.put('/api/records', asyncHandler(async (req, res) => {
       return;
     }
 
+    if (!acceptedRecords.length) return;
+
     try {
-      const result = await syncRecordsToGoogle(cleaned);
+      const result = await syncRecordsToGoogle(acceptedRecords);
       const syncedAt = new Date().toISOString();
-      const syncedIds = new Set(cleaned.map((record) => record.id));
+      const syncedIds = new Set(acceptedRecords.map((record) => record.id));
       await prisma.$transaction(async (tx) => {
         for (const id of syncedIds) {
           await tx.record.updateMany({
@@ -884,7 +939,7 @@ app.put('/api/records', asyncHandler(async (req, res) => {
       });
     } catch (error) {
       await prisma.$transaction(async (tx) => {
-        for (const rec of cleaned) {
+        for (const rec of acceptedRecords) {
           await tx.record.updateMany({
             where: { id: rec.id },
             data: { syncStatus: 'pending', syncError: error.message },

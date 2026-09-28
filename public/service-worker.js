@@ -1,4 +1,4 @@
-const CACHE_NAME = 'laundry-tracking-v8-realtime-sync';
+const CACHE_NAME = 'laundry-tracking-v9-shift-order';
 const APP_SHELL = [
   './',
   './config.js',
@@ -6,6 +6,7 @@ const APP_SHELL = [
   './styles.css',
   './app.js',
   './sync-queue.js',
+  './shift-order.js',
   './manifest.webmanifest',
   './icons/icon-192.png',
   './icons/icon-512.png'
@@ -43,7 +44,7 @@ self.addEventListener('fetch', (event) => {
   }
 
   const url = new URL(request.url);
-  const isAppAsset = ['/', '/index.html', '/app.js', '/sync-queue.js', '/styles.css', '/config.js', '/service-worker.js']
+  const isAppAsset = ['/', '/index.html', '/app.js', '/sync-queue.js', '/shift-order.js', '/styles.css', '/config.js', '/service-worker.js']
     .some((path) => url.pathname.endsWith(path));
 
   event.respondWith(

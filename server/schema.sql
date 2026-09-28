@@ -42,7 +42,7 @@ CREATE TABLE IF NOT EXISTS records (
     material        TEXT             NOT NULL DEFAULT '',
     color           TEXT             NOT NULL DEFAULT '',
     row_key         TEXT             NOT NULL DEFAULT '',
-    quantity        INTEGER          CHECK (quantity >= 0),
+    quantity        INTEGER          DEFAULT 0 CHECK (quantity >= 0),
     laundry_personnel TEXT           NOT NULL DEFAULT '',
     verified_by     TEXT             NOT NULL DEFAULT '',
     signature       TEXT             NOT NULL DEFAULT '',
@@ -99,6 +99,15 @@ CREATE TABLE IF NOT EXISTS daily_forms (
     date        DATE             PRIMARY KEY,
     created_at  TIMESTAMPTZ      NOT NULL DEFAULT NOW()
 );
+
+-- Persist the shared order of the four shifts without changing record keys.
+CREATE TABLE IF NOT EXISTS shift_orders (
+  shift         shift_type       PRIMARY KEY,
+  display_order INTEGER          NOT NULL CHECK (display_order >= 1),
+  updated_at    TIMESTAMPTZ      NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_shift_orders_display_order ON shift_orders (display_order);
 
 -- =========================================================================
 -- sync_events table

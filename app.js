@@ -1,4 +1,5 @@
 import { enqueueMutation, readMutationQueue, removeQueuedMutation } from './sync-queue.js';
+import { DEFAULT_SHIFT_ORDER, SHIFT_KEYS, isCompleteShiftOrder, moveShift, normalizeShiftOrder, placeShift } from './shift-order.js';
 
 const SHIFTS = [
   { key: 'morning', label: 'Shift 1 (Morning)', time: 'Morning shift' },
@@ -6,8 +7,6 @@ const SHIFTS = [
   { key: 'evening', label: 'Shift 3 (Straight Day Shift)', time: 'Straight day shift' },
   { key: 'night', label: 'Shift 4 (Night)', time: 'Night shift' }
 ];
-const DAILY_REGISTER_SHIFTS = [SHIFTS[3], SHIFTS[1], SHIFTS[2], SHIFTS[0]];
-
 // NOTE: Shift 3's storage key stays 'evening' everywhere (records, locks,
 // database enum, printed row ids) so existing rows keep working — only the
 // user-facing label changed to "Shift 3 (Straight Day Shift)".
@@ -25,6 +24,11 @@ const MATERIALS = [
 // any total — but historical rows stay readable in Daily Records / print.
 const RETIRED_MATERIALS = new Set(['Uniforms']);
 const isRetiredMaterial = (label) => RETIRED_MATERIALS.has(String(label || '').trim());
+
+function orderedDailyShifts() {
+  const shiftsByKey = new Map(SHIFTS.map((shift) => [shift.key, shift]));
+  return normalizeShiftOrder(state.shiftOrder).map((key) => shiftsByKey.get(key));
+}
 
 const STATUS_LABELS = {
   received: 'Received',
@@ -47,6 +51,7 @@ let state = {
   locks: [],
   syncEvents: [],
   dailyForms: [],
+  shiftOrder: [...DEFAULT_SHIFT_ORDER],
   formModal: null,
   online: navigator.onLine,
   apiConnected: false,
@@ -76,7 +81,7 @@ function loadLocal() {
       }
     }
     const saved = JSON.parse(raw || '{}');
-    state = { ...state, ...saved, tab: saved.tab || 'daily', selectedDate: saved.selectedDate || todayIso(), dailyForms: Array.isArray(saved.dailyForms) ? saved.dailyForms : [], formModal: null, online: navigator.onLine, syncing: false };
+    state = { ...state, ...saved, tab: saved.tab || 'daily', selectedDate: saved.selectedDate || todayIso(), dailyForms: Array.isArray(saved.dailyForms) ? saved.dailyForms : [], shiftOrder: normalizeShiftOrder(saved.shiftOrder), formModal: null, online: navigator.onLine, syncing: false };
   } catch {
     saveLocal();
   }
@@ -90,6 +95,7 @@ function saveLocal() {
     locks: state.locks,
     syncEvents: state.syncEvents,
     dailyForms: state.dailyForms,
+    shiftOrder: state.shiftOrder,
     notice: state.notice
   }));
 }
@@ -163,6 +169,7 @@ function mergeServerState(db) {
   const queuedDeleteIds = new Set(queue
     .filter((mutation) => mutation.type === 'delete-record')
     .map((mutation) => mutation.id));
+  const queuedShiftOrder = queue.filter((mutation) => mutation.type === 'set-shift-order').at(-1);
   const localById = new Map(state.records.map((record) => [record.id, normalizeRecord(record)]));
   const byId = new Map((db.records || []).map((record) => {
     const normalized = normalizeRecord(record);
@@ -174,6 +181,9 @@ function mergeServerState(db) {
   }
   for (const id of queuedDeleteIds) byId.delete(id);
   state.records = Array.from(byId.values());
+  if (!queuedShiftOrder && Array.isArray(db.shiftOrder)) {
+    state.shiftOrder = normalizeShiftOrder(db.shiftOrder);
+  }
   state.locks = db.locks || state.locks;
   state.syncEvents = db.syncEvents || state.syncEvents;
   // Merge explicit daily forms from the server with local ones, plus every
@@ -455,6 +465,15 @@ async function flushMutationQueue() {
             body: JSON.stringify({ date: mutation.date })
           });
           if (result.form) registerDailyForm(result.form.date);
+        } else if (mutation.type === 'set-shift-order') {
+          const result = await api('api/shift-order', {
+            method: 'PUT',
+            body: JSON.stringify({ order: mutation.order })
+          });
+          const laterOrder = readMutationQueue()
+            .filter((item) => item.id !== mutation.id && item.type === 'set-shift-order')
+            .at(-1);
+          state.shiftOrder = normalizeShiftOrder(laterOrder?.order || result.order || mutation.order);
         }
         removeQueuedMutation(mutation.id);
         saveLocal();
@@ -636,7 +655,9 @@ function renderDailyPage() {
           <span style="flex:1"></span>
           <button class="primary-button" data-action="print">Print This Day</button>
         </div>
-        ${DAILY_REGISTER_SHIFTS.map((shift) => renderShiftBlock(shift)).join('')}
+        <div class="shift-list" data-shift-list>
+          ${orderedDailyShifts().map((shift, index, shifts) => renderShiftBlock(shift, index, shifts.length)).join('')}
+        </div>
         <table class="overall-table" aria-label="Overall daily total">
           <tbody>
             <tr>
@@ -686,7 +707,7 @@ function renderFormModal() {
   `;
 }
 
-function renderShiftBlock(shift) {
+function renderShiftBlock(shift, orderIndex, shiftCount) {
   const rows = canonicalRows(state.selectedDate, shift.key);
   const archived = archivedRows(state.selectedDate, shift.key);
   const locked = isLocked(state.selectedDate, shift.key);
@@ -717,7 +738,16 @@ function renderShiftBlock(shift) {
               <span>${shift.label}</span>
               <span>${shift.time}</span>
             </td>
-            <td colspan="2" class="shift-heading">${shift.label}</td>
+            <td colspan="2" class="shift-heading">
+              <div class="shift-heading-content">
+                <span>${shift.label}</span>
+                <span class="shift-order-controls no-print">
+                  <button class="mini-button" data-action="shift-move-up" data-shift="${shift.key}" aria-label="Move ${shift.label} up" title="Move up" ${orderIndex === 0 ? 'disabled' : ''}>↑</button>
+                  <button class="shift-drag-handle" type="button" data-shift-drag="${shift.key}" aria-label="Drag ${shift.label} to reorder" title="Drag to reorder">⠿</button>
+                  <button class="mini-button" data-action="shift-move-down" data-shift="${shift.key}" aria-label="Move ${shift.label} down" title="Move down" ${orderIndex === shiftCount - 1 ? 'disabled' : ''}>↓</button>
+                </span>
+              </div>
+            </td>
             <td>
               <input data-shift="${shift.key}" data-shift-field="laundryPersonnel" value="${escapeAttr(shiftMeta.laundryPersonnel || '')}" placeholder="" ${locked ? 'readonly' : ''}>
               <input data-shift="${shift.key}" data-shift-field="signature" value="${escapeAttr(shiftMeta.signature || '')}" placeholder="Signature" ${locked ? 'readonly' : ''}>
@@ -884,6 +914,109 @@ async function createDailyForm(date) {
   render();
 }
 
+async function persistShiftOrder(order) {
+  if (!isCompleteShiftOrder(order) || order.every((key, index) => key === state.shiftOrder[index])) return;
+  const firstRects = captureShiftRects();
+  state.shiftOrder = [...order];
+  enqueueMutation({ type: 'set-shift-order', order: [...order] });
+  saveLocal();
+  render();
+  animateShiftOrderChange(firstRects);
+  if (navigator.onLine) await flushMutationQueue();
+}
+
+function shiftOrderFromList(list) {
+  return Array.from(list.children)
+    .map((block) => block.dataset.shiftBlock)
+    .filter(Boolean);
+}
+
+function captureShiftRects() {
+  return new Map(Array.from(document.querySelectorAll('[data-shift-block]'), (block) => [
+    block.dataset.shiftBlock,
+    block.getBoundingClientRect(),
+  ]));
+}
+
+function animateShiftOrderChange(firstRects) {
+  for (const block of document.querySelectorAll('[data-shift-block]')) {
+    const key = block.dataset.shiftBlock;
+    const first = firstRects.get(key);
+    if (!first) continue;
+    const deltaY = first.top - block.getBoundingClientRect().top;
+    if (Math.abs(deltaY) < 1) continue;
+    block.style.transition = 'none';
+    block.style.transform = `translateY(${deltaY}px)`;
+    requestAnimationFrame(() => {
+      block.style.transition = 'transform 180ms ease';
+      block.style.transform = '';
+    });
+  }
+}
+
+function bindShiftDrag(root) {
+  const list = root.querySelector('[data-shift-list]');
+  if (!list) return;
+  root.querySelectorAll('[data-shift-drag]').forEach((handle) => {
+    handle.addEventListener('pointerdown', (startEvent) => {
+      if (!startEvent.isPrimary || startEvent.button !== 0) return;
+      startEvent.preventDefault();
+      const movingKey = handle.dataset.shiftDrag;
+      const pointerId = startEvent.pointerId;
+      const initialOrder = shiftOrderFromList(list);
+      let targetKey = null;
+      let placeAfter = false;
+      let highlightedTarget = null;
+      handle.setPointerCapture(pointerId);
+      handle.setAttribute('aria-grabbed', 'true');
+      handle.closest('[data-shift-block]')?.classList.add('is-dragging');
+
+      const updateDropTarget = (event) => {
+        const target = document.elementFromPoint(event.clientX, event.clientY)?.closest('[data-shift-block]');
+        if (!target || !list.contains(target) || target.dataset.shiftBlock === movingKey) {
+          highlightedTarget?.classList.remove('shift-drop-before', 'shift-drop-after');
+          highlightedTarget = null;
+          targetKey = null;
+          return;
+        }
+        const targetRect = target.getBoundingClientRect();
+        placeAfter = event.clientY > targetRect.top + targetRect.height / 2;
+        highlightedTarget?.classList.remove('shift-drop-before', 'shift-drop-after');
+        highlightedTarget = target;
+        highlightedTarget.classList.add(placeAfter ? 'shift-drop-after' : 'shift-drop-before');
+        targetKey = target.dataset.shiftBlock;
+      };
+      const finish = (commit) => {
+        handle.removeEventListener('pointermove', onPointerMove);
+        handle.removeEventListener('pointerup', onPointerUp);
+        handle.removeEventListener('pointercancel', onPointerCancel);
+        highlightedTarget?.classList.remove('shift-drop-before', 'shift-drop-after');
+        handle.setAttribute('aria-grabbed', 'false');
+        handle.closest('[data-shift-block]')?.classList.remove('is-dragging');
+        if (commit && targetKey) persistShiftOrder(placeShift(initialOrder, movingKey, targetKey, placeAfter));
+      };
+      const onPointerMove = (event) => {
+        if (event.pointerId !== pointerId) return;
+        if (event.clientY < 48) window.scrollBy(0, -18);
+        else if (event.clientY > window.innerHeight - 48) window.scrollBy(0, 18);
+        updateDropTarget(event);
+      };
+      const onPointerUp = (event) => {
+        if (event.pointerId === pointerId) {
+          updateDropTarget(event);
+          finish(true);
+        }
+      };
+      const onPointerCancel = (event) => {
+        if (event.pointerId === pointerId) finish(false);
+      };
+      handle.addEventListener('pointermove', onPointerMove);
+      handle.addEventListener('pointerup', onPointerUp);
+      handle.addEventListener('pointercancel', onPointerCancel);
+    });
+  });
+}
+
 function bindEvents(root) {
   root.querySelectorAll('[data-tab]').forEach((button) => {
     button.addEventListener('click', () => {
@@ -941,6 +1074,9 @@ function bindEvents(root) {
     root.querySelectorAll('[data-action]').forEach((element) => {
     element.addEventListener('click', async () => {
       const action = element.dataset.action;
+      if (action === 'shift-move-up' || action === 'shift-move-down') {
+        await persistShiftOrder(moveShift(state.shiftOrder, element.dataset.shift, action === 'shift-move-up' ? -1 : 1));
+      }
       if (action === 'print') window.print();
       if (action === 'new-today') {
         state.selectedDate = todayIso();
@@ -1003,6 +1139,7 @@ function bindEvents(root) {
       }
     });
   }
+  bindShiftDrag(root);
 }
 
 function cssEscape(value) {
@@ -1034,6 +1171,22 @@ function scheduleRealtimeRender() {
     saveLocal();
     if (!document.hidden) render();
   }, 80);
+}
+
+function applyRealtimeShiftOrder(payload) {
+  if (readMutationQueue().some((mutation) => mutation.type === 'set-shift-order')) return;
+  const row = payload.eventType === 'DELETE' ? payload.old : payload.new;
+  if (!row?.shift || !SHIFT_KEYS.includes(row.shift)) return;
+  const positions = new Map(state.shiftOrder.map((shift, index) => [shift, index]));
+  if (payload.eventType === 'DELETE') {
+    positions.set(row.shift, DEFAULT_SHIFT_ORDER.indexOf(row.shift));
+  } else {
+    const displayOrder = Number(row.display_order);
+    if (Number.isInteger(displayOrder) && displayOrder > 0) positions.set(row.shift, displayOrder - 1);
+  }
+  state.shiftOrder = normalizeShiftOrder(SHIFT_KEYS.slice().sort((left, right) =>
+    (positions.get(left) ?? Number.MAX_SAFE_INTEGER) - (positions.get(right) ?? Number.MAX_SAFE_INTEGER)));
+  scheduleRealtimeRender();
 }
 
 function applyRealtimeRecord(payload) {
@@ -1113,6 +1266,7 @@ async function startRealtime() {
         .on('postgres_changes', { event: '*', schema: 'public', table: 'records' }, applyRealtimeRecord)
         .on('postgres_changes', { event: '*', schema: 'public', table: 'locks' }, applyRealtimeLock)
         .on('postgres_changes', { event: '*', schema: 'public', table: 'daily_forms' }, applyRealtimeDailyForm)
+        .on('postgres_changes', { event: '*', schema: 'public', table: 'shift_orders' }, applyRealtimeShiftOrder)
         .subscribe((status) => {
           state.realtimeConnected = status === 'SUBSCRIBED';
           renderStatusOnly();
