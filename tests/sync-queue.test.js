@@ -29,6 +29,16 @@ test('acknowledging one mutation removes only that queue item', () => {
   assert.deepEqual(readMutationQueue(storage).map((item) => item.id), [queue[1].id]);
 });
 
+test('color catalog edits remain ordered offline mutations', () => {
+  const storage = createStorage();
+  enqueueMutation({ type: 'rename-material-color', material: 'Shirts', from: 'White', to: 'Ivory' }, storage);
+  enqueueMutation({ type: 'delete-material-color', material: 'Shirts', label: 'Ivory' }, storage);
+
+  assert.deepEqual(readMutationQueue(storage).map((item) => item.type), [
+    'rename-material-color', 'delete-material-color'
+  ]);
+});
+
 test('corrupt local queue data is treated as empty', () => {
   const storage = createStorage();
   storage.setItem('laundry-mutation-queue-v1', '{bad json');

@@ -109,6 +109,18 @@ CREATE TABLE IF NOT EXISTS shift_orders (
 
 CREATE INDEX IF NOT EXISTS idx_shift_orders_display_order ON shift_orders (display_order);
 
+CREATE TABLE IF NOT EXISTS material_colors (
+  id            SERIAL PRIMARY KEY,
+  material      TEXT             NOT NULL,
+  label         TEXT             NOT NULL CHECK (length(trim(label)) BETWEEN 1 AND 50),
+  display_order INTEGER          NOT NULL CHECK (display_order >= 1),
+  created_at    TIMESTAMPTZ      NOT NULL DEFAULT NOW(),
+  updated_at    TIMESTAMPTZ      NOT NULL DEFAULT NOW(),
+  CONSTRAINT material_colors_material_label_key UNIQUE (material, label)
+);
+
+CREATE INDEX IF NOT EXISTS idx_material_colors_material_order ON material_colors (material, display_order);
+
 -- =========================================================================
 -- sync_events table
 -- Replaces the JSON "syncEvents" array. Append-only log of sync attempts.

@@ -11,6 +11,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { verifyPassword } from './auth.js';
 import { normalizeShift, formExists as formDateExists, isValidFormDate } from './forms.js';
 import { DEFAULT_SHIFT_ORDER, SHIFT_KEYS as ORDERABLE_SHIFT_KEYS, isCompleteShiftOrder, normalizeShiftOrder } from '../shift-order.js';
+import { DEFAULT_MATERIAL_COLORS, MATERIAL_LABELS, normalizeMaterialColors } from '../material-colors.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -288,6 +289,9 @@ async function applySchema() {
     create: { shift, displayOrder: index + 1 },
     update: {},
   })));
+  if (await prisma.materialColor.count() === 0) {
+    await prisma.materialColor.createMany({ data: DEFAULT_MATERIAL_COLORS, skipDuplicates: true });
+  }
 }
 
 async function ensureSchema() {
@@ -370,18 +374,20 @@ async function readDb() {
   if (hasDb()) {
     await ensureSchema();
     // Prisma reads through the validated client (no SELECT *, no raw SQL).
-    const [records, locks, syncEvents, forms, shiftOrderRows] = await Promise.all([
+    const [records, locks, syncEvents, forms, shiftOrderRows, materialColors] = await Promise.all([
       prisma.record.findMany({ orderBy: [{ date: 'desc' }, { shift: 'asc' }, { material: 'asc' }, { rowKey: 'asc' }, { color: 'asc' }] }),
       prisma.lock.findMany({ orderBy: { lockedAt: 'desc' } }),
       prisma.syncEvent.findMany({ orderBy: { at: 'desc' }, take: 200 }),
       prisma.dailyForm.findMany({ orderBy: { date: 'desc' } }).catch(() => []),
       prisma.shiftOrder.findMany({ orderBy: [{ displayOrder: 'asc' }, { shift: 'asc' }] }),
+      prisma.materialColor.findMany({ orderBy: [{ material: 'asc' }, { displayOrder: 'asc' }, { label: 'asc' }] }),
     ]);
     const db = {
       records: records.map(prismaRecordToApi),
       locks: locks.map(prismaLockToApi),
       syncEvents: syncEvents.map(prismaSyncEventToApi),
       shiftOrder: normalizeShiftOrder(shiftOrderRows.map((row) => row.shift)),
+      materialColors: normalizeMaterialColors(materialColors),
       dailyForms: forms.map((row) => ({
         date: toDateOnly(row.date),
         createdAt: row.createdAt,
@@ -411,11 +417,12 @@ async function readDb() {
 async function readJsonDb() {
   if (!existsSync(dataDir)) await mkdir(dataDir, { recursive: true });
   if (!existsSync(dbPath)) {
-    await writeFile(dbPath, JSON.stringify({ records: [], locks: [], syncEvents: [], dailyForms: [], shiftOrder: DEFAULT_SHIFT_ORDER }, null, 2));
+    await writeFile(dbPath, JSON.stringify({ records: [], locks: [], syncEvents: [], dailyForms: [], shiftOrder: DEFAULT_SHIFT_ORDER, materialColors: DEFAULT_MATERIAL_COLORS }, null, 2));
   }
   const fallback = JSON.parse(await readFile(dbPath, 'utf8'));
   fallback.dailyForms = Array.isArray(fallback.dailyForms) ? fallback.dailyForms : [];
   fallback.shiftOrder = normalizeShiftOrder(fallback.shiftOrder);
+  fallback.materialColors = normalizeMaterialColors(fallback.materialColors);
   const seenFallback = new Set(fallback.dailyForms.map((form) => form?.date).filter(Boolean));
   for (const record of fallback.records || []) {
     if (record?.date && !seenFallback.has(record.date)) {
@@ -754,6 +761,170 @@ app.post('/api/auth/login', asyncHandler(async (req, res) => {
 app.get('/api/records', asyncHandler(async (_req, res) => {
   const db = await readDb();
   res.json(db);
+}));
+
+function isValidMaterialColor(material, label) {
+  return MATERIAL_LABELS.includes(material)
+    && Boolean(label)
+    && label.length <= 50
+    && !/[\u0000-\u001f]/.test(label);
+}
+
+async function listMaterialColors(tx = prisma) {
+  const rows = await tx.materialColor.findMany({
+    orderBy: [{ material: 'asc' }, { displayOrder: 'asc' }, { label: 'asc' }],
+  });
+  return normalizeMaterialColors(rows);
+}
+
+app.get('/api/material-colors', asyncHandler(async (_req, res) => {
+  if (hasDb()) {
+    await ensureSchema();
+    res.json({ ok: true, materialColors: await listMaterialColors() });
+    return;
+  }
+  const db = await readJsonDb();
+  res.json({ ok: true, materialColors: db.materialColors });
+}));
+
+app.post('/api/material-colors', asyncHandler(async (req, res) => {
+  const material = cleanText(req.body?.material);
+  const label = cleanText(req.body?.label);
+  if (!isValidMaterialColor(material, label)) {
+    res.status(400).json({ ok: false, error: 'A supported material and a color label of 1-50 characters are required.' });
+    return;
+  }
+
+  if (hasDb()) {
+    await ensureSchema();
+    const result = await prisma.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtext(${material})) IS NULL AS locked`;
+      const rows = await tx.materialColor.findMany({ where: { material }, select: { label: true, displayOrder: true } });
+      if (rows.some((row) => row.label.toLocaleLowerCase() === label.toLocaleLowerCase())) return { conflict: true };
+      const displayOrder = Math.max(0, ...rows.map((row) => row.displayOrder)) + 1;
+      await tx.materialColor.create({ data: { material, label, displayOrder } });
+      return { materialColors: await listMaterialColors(tx) };
+    });
+    if (result.conflict) {
+      res.status(409).json({ ok: false, error: 'That color already exists for this material.' });
+      return;
+    }
+    res.status(201).json({ ok: true, materialColors: result.materialColors });
+    return;
+  }
+
+  const db = await readJsonDb();
+  if (db.materialColors.some((row) => row.material === material && row.label.toLocaleLowerCase() === label.toLocaleLowerCase())) {
+    res.status(409).json({ ok: false, error: 'That color already exists for this material.' });
+    return;
+  }
+  const displayOrder = Math.max(0, ...db.materialColors.filter((row) => row.material === material).map((row) => row.displayOrder)) + 1;
+  db.materialColors = normalizeMaterialColors([...db.materialColors, { material, label, displayOrder }]);
+  await writeJsonDb(db);
+  res.status(201).json({ ok: true, materialColors: db.materialColors });
+}));
+
+app.put('/api/material-colors', asyncHandler(async (req, res) => {
+  const material = cleanText(req.body?.material);
+  const from = cleanText(req.body?.from);
+  const to = cleanText(req.body?.to);
+  if (!isValidMaterialColor(material, from) || !isValidMaterialColor(material, to)) {
+    res.status(400).json({ ok: false, error: 'A supported material and valid old/new color labels are required.' });
+    return;
+  }
+
+  if (hasDb()) {
+    await ensureSchema();
+    const result = await prisma.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtext(${material})) IS NULL AS locked`;
+      const current = await tx.materialColor.findUnique({ where: { material_label: { material, label: from } } });
+      if (!current) return { missing: true };
+      const rows = await tx.materialColor.findMany({ where: { material }, select: { label: true } });
+      if (rows.some((row) => row.label !== from && row.label.toLocaleLowerCase() === to.toLocaleLowerCase())) {
+        return { conflict: true };
+      }
+      if (from !== to) {
+        await tx.record.updateMany({ where: { material, color: from }, data: { color: to } });
+        await tx.materialColor.update({
+          where: { material_label: { material, label: from } },
+          data: { label: to, updatedAt: new Date() },
+        });
+      }
+      return { materialColors: await listMaterialColors(tx) };
+    });
+    if (result.missing) {
+      res.status(404).json({ ok: false, error: 'Color not found.' });
+      return;
+    }
+    if (result.conflict) {
+      res.status(409).json({ ok: false, error: 'That color already exists for this material.' });
+      return;
+    }
+    res.json({ ok: true, materialColors: result.materialColors });
+    return;
+  }
+
+  const db = await readJsonDb();
+  if (!db.materialColors.some((row) => row.material === material && row.label === from)) {
+    res.status(404).json({ ok: false, error: 'Color not found.' });
+    return;
+  }
+  if (db.materialColors.some((row) => row.material === material && row.label !== from && row.label.toLocaleLowerCase() === to.toLocaleLowerCase())) {
+    res.status(409).json({ ok: false, error: 'That color already exists for this material.' });
+    return;
+  }
+  db.materialColors = normalizeMaterialColors(db.materialColors.map((row) =>
+    row.material === material && row.label === from ? { ...row, label: to } : row));
+  db.records = db.records.map((record) =>
+    record.material === material && record.color === from ? { ...record, color: to } : record);
+  await writeJsonDb(db);
+  res.json({ ok: true, materialColors: db.materialColors });
+}));
+
+app.delete('/api/material-colors/:material/:label', asyncHandler(async (req, res) => {
+  const material = cleanText(req.params.material);
+  const label = cleanText(req.params.label);
+  if (!isValidMaterialColor(material, label)) {
+    res.status(400).json({ ok: false, error: 'A supported material and valid color label are required.' });
+    return;
+  }
+
+  if (hasDb()) {
+    await ensureSchema();
+    const result = await prisma.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtext(${material})) IS NULL AS locked`;
+      const current = await tx.materialColor.findUnique({ where: { material_label: { material, label } } });
+      if (!current) return { missing: true };
+      const count = await tx.materialColor.count({ where: { material } });
+      if (count <= 1) return { lastColor: true };
+      await tx.materialColor.delete({ where: { material_label: { material, label } } });
+      return { materialColors: await listMaterialColors(tx) };
+    });
+    if (result.missing) {
+      res.status(404).json({ ok: false, error: 'Color not found.' });
+      return;
+    }
+    if (result.lastColor) {
+      res.status(409).json({ ok: false, error: 'Each material must keep at least one color.' });
+      return;
+    }
+    res.json({ ok: true, materialColors: result.materialColors });
+    return;
+  }
+
+  const db = await readJsonDb();
+  const materialColors = db.materialColors.filter((row) => row.material === material);
+  if (!materialColors.some((row) => row.label === label)) {
+    res.status(404).json({ ok: false, error: 'Color not found.' });
+    return;
+  }
+  if (materialColors.length <= 1) {
+    res.status(409).json({ ok: false, error: 'Each material must keep at least one color.' });
+    return;
+  }
+  db.materialColors = db.materialColors.filter((row) => row.material !== material || row.label !== label);
+  await writeJsonDb(db);
+  res.json({ ok: true, materialColors: db.materialColors });
 }));
 
 app.put('/api/shift-order', asyncHandler(async (req, res) => {

@@ -42,6 +42,7 @@ h2 { font-size: 22px; line-height: 1.2; letter-spacing: 0.01em; }
 .tab.active { background: var(--surface); color: var(--accent-dark); border-color: var(--line); }
 .pill, .primary-button, .mini-button { min-height: 38px; border: 1px solid var(--line); border-radius: 8px; padding: 0 13px; background: var(--surface); color: var(--ink); font-size: 13px; font-weight: 800; box-shadow: 0 2px 5px rgba(24, 51, 47, 0.05); }
 .primary-button { background: var(--accent); border-color: var(--accent-dark); color: #fff; }
+.danger-button { min-height: 38px; border: 1px solid #7f3030; border-radius: 8px; padding: 0 13px; background: var(--danger); color: #fff; font-size: 13px; font-weight: 800; box-shadow: 0 2px 5px rgba(24, 51, 47, 0.05); }
 .mini-button { min-height: 30px; padding: 0 9px; font-size: 12px; background: #f8fbf9; }
 .sync-note { min-height: 22px; margin: 0 0 10px; color: var(--muted); font-size: 13px; }
 
@@ -87,6 +88,12 @@ input:focus, select:focus { border-color: var(--accent); outline: 2px solid rgba
 .shift-block.is-dragging { position: relative; z-index: 1; opacity: 0.78; }
 .shift-block.shift-drop-before { box-shadow: inset 0 3px 0 var(--accent); }
 .shift-block.shift-drop-after { box-shadow: inset 0 -3px 0 var(--accent); }
+.color-label-controls { display: inline-flex; align-items: center; gap: 5px; padding-left: 18px; }
+.color-label-button { min-height: 30px; padding: 2px 0; border: 0; background: transparent; color: var(--ink); font-weight: 700; text-align: left; }
+.color-label-button:hover { color: var(--accent-dark); text-decoration: underline; }
+.color-label-button:focus-visible, .color-delete-button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.color-delete-button { display: inline-grid; place-items: center; width: 24px; min-width: 24px; height: 24px; min-height: 24px; padding: 0; border: 1px solid var(--line-soft); border-radius: 5px; background: var(--surface); color: var(--danger); font-size: 17px; line-height: 1; }
+.retired-color-label { display: inline-block; padding-left: 18px; color: var(--muted); }
 .laundry-register, .overall-table, .records-table { width: 100%; border-collapse: collapse; table-layout: fixed; background: var(--surface); }
 .laundry-register { min-width: 1160px; }
 .date-col { width: 18%; }

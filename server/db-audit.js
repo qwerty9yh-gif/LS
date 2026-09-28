@@ -50,7 +50,7 @@ async function audit(label, url) {
         (extra.length ? ` | extra: ${extra.join(', ')}` : ''));
     }
 
-    for (const t of ['records', 'locks', 'daily_forms', 'shift_orders', 'sync_events', 'users']) {
+    for (const t of ['records', 'locks', 'daily_forms', 'shift_orders', 'material_colors', 'sync_events', 'users']) {
       try {
         const r = await pool.query(`SELECT COUNT(*)::int AS c FROM public.${t}`);
         console.log(`rows ${t} = ${r.rows[0].c}`);
@@ -66,6 +66,15 @@ async function audit(label, url) {
       console.log('shift order:', JSON.stringify(order.rows));
     } catch (err) {
       console.log('shift order: ERROR', err.message);
+    }
+
+    try {
+      const colors = await pool.query(
+        `SELECT material, label, display_order FROM public.material_colors ORDER BY material, display_order, label`,
+      );
+      console.log('material colors:', JSON.stringify(colors.rows));
+    } catch (err) {
+      console.log('material colors: ERROR', err.message);
     }
 
     try {

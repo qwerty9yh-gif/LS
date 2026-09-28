@@ -1,5 +1,6 @@
 import { enqueueMutation, readMutationQueue, removeQueuedMutation } from './sync-queue.js';
 import { DEFAULT_SHIFT_ORDER, SHIFT_KEYS, isCompleteShiftOrder, moveShift, normalizeShiftOrder, placeShift } from './shift-order.js';
+import { DEFAULT_MATERIAL_COLORS, applyMaterialColorMutation, normalizeMaterialColors } from './material-colors.js';
 
 const SHIFTS = [
   { key: 'morning', label: 'Shift 1 (Morning)', time: 'Morning shift' },
@@ -12,12 +13,12 @@ const SHIFTS = [
 // user-facing label changed to "Shift 3 (Straight Day Shift)".
 
 const MATERIALS = [
-  { key: 'shirts', label: 'Shirts', colors: ['White', 'Blue', 'Brown', 'Grey'] },
-  { key: 'trousers', label: 'Trousers', colors: ['Grey', 'Blue', 'Brown'] },
-  { key: 'overcoats', label: 'Overcoats', colors: ['White', 'Blue Black', 'Cereals High Hygiene'] },
-  { key: 'towels', label: 'Towels', colors: ['White', 'Blue', 'Green', 'Yellow'] },
-  { key: 'tablecloths', label: 'Table Clothes', colors: ['White', 'Cream', 'Blue'] },
-  { key: 'bedsheets', label: 'Bed Sheets', colors: ['White', 'Cream', 'Blue', 'Green'] }
+  { key: 'shirts', label: 'Shirts' },
+  { key: 'trousers', label: 'Trousers' },
+  { key: 'overcoats', label: 'Overcoats' },
+  { key: 'towels', label: 'Towels' },
+  { key: 'tablecloths', label: 'Table Clothes' },
+  { key: 'bedsheets', label: 'Bed Sheets' }
 ];
 
 // Retired categories: never rendered as editable sections, never counted in
@@ -51,8 +52,10 @@ let state = {
   locks: [],
   syncEvents: [],
   dailyForms: [],
+  materialColors: normalizeMaterialColors(DEFAULT_MATERIAL_COLORS),
   shiftOrder: [...DEFAULT_SHIFT_ORDER],
   formModal: null,
+  colorModal: null,
   online: navigator.onLine,
   apiConnected: false,
   syncing: false,
@@ -70,6 +73,7 @@ let realtimeChannel = null;
 let realtimeStartPromise = null;
 let hydratePromise = null;
 let realtimeRenderTimer = null;
+let materialColorPollTimer = null;
 
 function loadLocal() {
   try {
@@ -81,7 +85,7 @@ function loadLocal() {
       }
     }
     const saved = JSON.parse(raw || '{}');
-    state = { ...state, ...saved, tab: saved.tab || 'daily', selectedDate: saved.selectedDate || todayIso(), dailyForms: Array.isArray(saved.dailyForms) ? saved.dailyForms : [], shiftOrder: normalizeShiftOrder(saved.shiftOrder), formModal: null, online: navigator.onLine, syncing: false };
+    state = { ...state, ...saved, tab: saved.tab || 'daily', selectedDate: saved.selectedDate || todayIso(), dailyForms: Array.isArray(saved.dailyForms) ? saved.dailyForms : [], materialColors: normalizeMaterialColors(saved.materialColors), shiftOrder: normalizeShiftOrder(saved.shiftOrder), formModal: null, colorModal: null, online: navigator.onLine, syncing: false };
   } catch {
     saveLocal();
   }
@@ -95,6 +99,7 @@ function saveLocal() {
     locks: state.locks,
     syncEvents: state.syncEvents,
     dailyForms: state.dailyForms,
+    materialColors: state.materialColors,
     shiftOrder: state.shiftOrder,
     notice: state.notice
   }));
@@ -130,7 +135,9 @@ async function api(path, options = {}) {
   state.apiConnected = true;
   if (!response.ok && response.status !== 202) {
     const body = await response.json().catch(() => ({}));
-    throw new Error(body.error || 'Request failed.');
+    const error = new Error(body.error || 'Request failed.');
+    error.status = response.status;
+    throw error;
   }
   return response.json();
 }
@@ -170,6 +177,8 @@ function mergeServerState(db) {
     .filter((mutation) => mutation.type === 'delete-record')
     .map((mutation) => mutation.id));
   const queuedShiftOrder = queue.filter((mutation) => mutation.type === 'set-shift-order').at(-1);
+  const queuedColorMutations = queue.filter((mutation) => mutation.type.endsWith('-material-color'));
+  const queuedColorRenames = queuedColorMutations.filter((mutation) => mutation.type === 'rename-material-color');
   const localById = new Map(state.records.map((record) => [record.id, normalizeRecord(record)]));
   const byId = new Map((db.records || []).map((record) => {
     const normalized = normalizeRecord(record);
@@ -180,7 +189,13 @@ function mergeServerState(db) {
     if (local) byId.set(id, local);
   }
   for (const id of queuedDeleteIds) byId.delete(id);
-  state.records = Array.from(byId.values());
+  state.records = Array.from(byId.values()).map((record) => queuedColorRenames.reduce((current, mutation) =>
+    current.material === mutation.material && current.color === mutation.from
+      ? { ...current, color: mutation.to }
+      : current, record));
+  state.materialColors = queuedColorMutations.reduce((colors, mutation) =>
+    applyMaterialColorMutation(colors, mutation),
+  normalizeMaterialColors(Array.isArray(db.materialColors) ? db.materialColors : state.materialColors));
   if (!queuedShiftOrder && Array.isArray(db.shiftOrder)) {
     state.shiftOrder = normalizeShiftOrder(db.shiftOrder);
   }
@@ -242,6 +257,10 @@ function recordsForShift(date, shift) {
   return recordsForDate(date).filter((record) => record.shift === shift);
 }
 
+function materialColorsFor(material) {
+  return normalizeMaterialColors(state.materialColors).filter((row) => row.material === material);
+}
+
 function recordMap(date) {
   const rows = new Map();
   for (const record of recordsForDate(date)) {
@@ -270,27 +289,34 @@ function quantityNumber(value) {
 
 function canonicalRows(date, shift) {
   const map = recordMap(date);
+  const shiftRecords = recordsForShift(date, shift);
   const rows = [];
   for (const material of MATERIALS) {
-    material.colors.forEach((color, index) => {
-      const id = rowId(date, shift, material.label, color, index);
+    materialColorsFor(material.label).forEach((color, index) => {
+      const existing = shiftRecords.find((record) => record.material === material.label
+        && record.color === color.label
+        && !String(record.rowKey || '').includes(':extra:'));
+      const id = existing?.id || rowId(date, shift, material.label, color.label, index);
       rows.push({
         id,
         date,
         shift,
         material: material.label,
-        color,
-        rowKey: `${material.key}:${slug(color)}:${index}`,
+        color: color.label,
+        rowKey: existing?.rowKey || `${material.key}:${slug(color.label)}:${index}`,
         fixed: true,
-        ...(map.get(id) || {})
+        ...(existing || map.get(id) || {})
       });
     });
-    const extras = recordsForShift(date, shift)
+    const extras = shiftRecords
       .filter((record) => record.material === material.label && !rows.some((row) => row.id === record.id))
       .sort((a, b) => (a.rowKey || a.color).localeCompare(b.rowKey || b.color));
-    rows.push(...extras);
+    rows.push(...extras.map((record) => ({
+      ...record,
+      fixed: Boolean(record.color) && !materialColorsFor(material.label).some((color) => color.label === record.color),
+    })));
   }
-  const legacy = recordsForShift(date, shift).filter((record) => {
+  const legacy = shiftRecords.filter((record) => {
     // Retired categories (e.g. historical Uniforms) are NEVER part of the
     // editable register or any total — they live in archivedRows() instead.
     if (isRetiredMaterial(record.material)) return false;
@@ -398,27 +424,77 @@ async function persistRecords(records) {
   if (navigator.onLine) await flushMutationQueue();
 }
 
-async function addColorRow(shift, materialLabel) {
-  const color = '';
-  const existing = canonicalRows(state.selectedDate, shift).filter((row) => row.material === materialLabel).length;
-  const id = rowId(state.selectedDate, shift, materialLabel, `extra-${Date.now()}`, existing);
-  const shiftRows = recordsForShift(state.selectedDate, shift);
-  const template = shiftRows[0] || {};
-  const record = buildRecordFromInput({
-    id,
-    date: state.selectedDate,
-    shift,
-    material: materialLabel,
-    color,
-    rowKey: `${slug(materialLabel)}:extra:${existing}`,
-    quantity: '',
-    laundryPersonnel: template.laundryPersonnel || '',
-    verifiedBy: template.verifiedBy || '',
-    signature: template.signature || ''
-  });
-  updateLocalRecord(record);
-  await persistRecords([record]);
+function isValidColorLabel(material, label) {
+  return MATERIALS.some((item) => item.label === material)
+    && Boolean(label)
+    && label.length <= 50
+    && !/[\u0000-\u001f]/.test(label);
+}
+
+async function persistMaterialColorMutation(mutation) {
+  enqueueMutation(mutation);
+  saveLocal();
   render();
+  if (navigator.onLine) await flushMutationQueue();
+}
+
+async function addMaterialColor(material) {
+  state.colorModal = { mode: 'create', material, label: '', error: '' };
+  render();
+}
+
+async function renameMaterialColor(material, from) {
+  state.colorModal = { mode: 'rename', material, from, label: from, error: '' };
+  render();
+}
+
+async function deleteMaterialColor(material, label) {
+  if (materialColorsFor(material).length <= 1) {
+    state.notice = 'Each material must keep at least one color.';
+    return render();
+  }
+  state.colorModal = { mode: 'delete', material, label, error: '' };
+  render();
+}
+
+async function saveMaterialColor() {
+  const modal = state.colorModal;
+  const label = String(modal?.label || '').trim();
+  if (!modal || modal.mode === 'delete') return;
+  if (!isValidColorLabel(modal.material, label)) {
+    state.colorModal = { ...modal, error: 'Enter a color label with 1 to 50 characters.' };
+    return render();
+  }
+  if (materialColorsFor(modal.material).some((row) => row.label !== modal.from
+    && row.label.toLocaleLowerCase() === label.toLocaleLowerCase())) {
+    state.colorModal = { ...modal, error: 'That color already exists for this material.' };
+    return render();
+  }
+  state.colorModal = null;
+  state.notice = '';
+  if (modal.mode === 'create') {
+    const displayOrder = Math.max(0, ...materialColorsFor(modal.material).map((row) => row.displayOrder)) + 1;
+    state.materialColors = normalizeMaterialColors([...state.materialColors, { material: modal.material, label, displayOrder }]);
+    return persistMaterialColorMutation({ type: 'create-material-color', material: modal.material, label });
+  }
+  if (label === modal.from) return render();
+  state.materialColors = normalizeMaterialColors(state.materialColors.map((row) =>
+    row.material === modal.material && row.label === modal.from ? { ...row, label } : row));
+  state.records = state.records.map((record) =>
+    record.material === modal.material && record.color === modal.from ? { ...record, color: label } : record);
+  for (const [id, record] of tableDraft) {
+    if (record.material === modal.material && record.color === modal.from) tableDraft.set(id, { ...record, color: label });
+  }
+  return persistMaterialColorMutation({ type: 'rename-material-color', material: modal.material, from: modal.from, to: label });
+}
+
+async function confirmDeleteMaterialColor() {
+  const modal = state.colorModal;
+  if (modal?.mode !== 'delete') return;
+  state.materialColors = state.materialColors.filter((row) => row.material !== modal.material || row.label !== modal.label);
+  state.colorModal = null;
+  state.notice = '';
+  await persistMaterialColorMutation({ type: 'delete-material-color', material: modal.material, label: modal.label });
 }
 
 async function deleteRecord(id) {
@@ -474,10 +550,43 @@ async function flushMutationQueue() {
             .filter((item) => item.id !== mutation.id && item.type === 'set-shift-order')
             .at(-1);
           state.shiftOrder = normalizeShiftOrder(laterOrder?.order || result.order || mutation.order);
+        } else if (mutation.type.endsWith('-material-color')) {
+          let result;
+          if (mutation.type === 'create-material-color') {
+            result = await api('api/material-colors', {
+              method: 'POST',
+              body: JSON.stringify({ material: mutation.material, label: mutation.label })
+            });
+          } else if (mutation.type === 'rename-material-color') {
+            result = await api('api/material-colors', {
+              method: 'PUT',
+              body: JSON.stringify({ material: mutation.material, from: mutation.from, to: mutation.to })
+            });
+          } else {
+            result = await api(`api/material-colors/${encodeURIComponent(mutation.material)}/${encodeURIComponent(mutation.label)}`, { method: 'DELETE' });
+          }
+          const laterColorMutation = readMutationQueue().some((item) => item.id !== mutation.id
+            && item.type.endsWith('-material-color') && item.material === mutation.material);
+          if (!laterColorMutation && Array.isArray(result.materialColors)) {
+            state.materialColors = normalizeMaterialColors(result.materialColors);
+          }
         }
         removeQueuedMutation(mutation.id);
         saveLocal();
-      } catch {
+      } catch (error) {
+        if (mutation.type.endsWith('-material-color') && error.status >= 400 && error.status < 500) {
+          removeQueuedMutation(mutation.id);
+          try {
+            const db = await api('api/records');
+            mergeServerState(db);
+          } catch {
+            state.materialColors = state.materialColors.filter((row) => row.material !== mutation.material);
+          }
+          state.notice = error.message;
+          saveLocal();
+          render();
+          continue;
+        }
         if (navigator.onLine) {
           clearTimeout(mutationRetryTimer);
           mutationRetryTimer = setTimeout(() => flushMutationQueue(), mutationRetryDelay);
@@ -617,9 +726,11 @@ function render() {
         <p class="sync-note no-print" data-notice>${escapeHtml(state.notice || '')}</p>
         ${state.tab === 'records' ? renderRecordsPage() : state.tab === 'monthly' ? renderMonthlyPage() : renderDailyPage()}
       </main>
+      ${renderColorModal()}
     </div>
   `;
   bindEvents(root);
+  if (state.colorModal && state.colorModal.mode !== 'delete') root.querySelector('[data-color-label]')?.focus();
 }
 
 function installModeText() {
@@ -701,6 +812,32 @@ function renderFormModal() {
         <div class="modal-actions">
           <button class="mini-button" data-action="close-modal">Cancel</button>
           <button class="primary-button" data-action="create-form">Create</button>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+function renderColorModal() {
+  const modal = state.colorModal;
+  if (!modal) return '';
+  const deleting = modal.mode === 'delete';
+  const title = deleting ? `Delete ${modal.label}?` : modal.mode === 'rename' ? 'Rename color' : 'Add color';
+  return `
+    <div class="modal-overlay" data-color-modal-overlay tabindex="-1">
+      <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="color-modal-title">
+        <h3 id="color-modal-title">${escapeHtml(title)}</h3>
+        <p class="subtle">${deleting
+          ? 'The color label will be removed. Existing records and quantities will be kept.'
+          : `Color for ${escapeHtml(modal.material)}`}</p>
+        ${deleting ? '' : `
+          <label class="modal-label" for="color-modal-input">Color label</label>
+          <input id="color-modal-input" data-color-label maxlength="50" value="${escapeAttr(modal.label)}" autocomplete="off">
+        `}
+        ${modal.error ? `<p class="login-error">${escapeHtml(modal.error)}</p>` : ''}
+        <div class="modal-actions">
+          <button class="mini-button" data-action="color-cancel">Cancel</button>
+          <button class="${deleting ? 'danger-button' : 'primary-button'}" data-action="${deleting ? 'color-delete-confirm' : 'color-save'}">${deleting ? 'Delete Color' : 'Save Color'}</button>
         </div>
       </div>
     </div>
@@ -789,7 +926,7 @@ function renderMaterialRows(shift, material, allRows, locked) {
       <td></td>
       <td colspan="4">
         <span>${material.label}</span>
-        <button class="mini-button no-print" data-add-color="${shift.key}:${material.label}" ${locked ? 'disabled' : ''}>Add Color</button>
+        <button class="mini-button no-print" data-add-color="${escapeAttr(material.label)}">Add Color</button>
       </td>
     </tr>
     ${rows.map((row) => renderColorRow(row, locked)).join('')}
@@ -805,11 +942,15 @@ function renderMaterialRows(shift, material, allRows, locked) {
 
 function renderColorRow(row, locked) {
   const canDelete = !row.fixed;
+  const colorIsManaged = materialColorsFor(row.material).some((item) => item.label === row.color);
+  const colorLabel = colorIsManaged
+    ? `<span class="color-label-controls"><button class="color-label-button no-print" data-color-edit-material="${escapeAttr(row.material)}" data-color-edit-label="${escapeAttr(row.color)}">${escapeHtml(row.color)}</button><button class="color-delete-button no-print" data-color-delete-material="${escapeAttr(row.material)}" data-color-delete-label="${escapeAttr(row.color)}" aria-label="Delete ${escapeAttr(row.color)} from ${escapeAttr(row.material)}" title="Delete color">×</button></span>`
+    : `<span class="retired-color-label">${escapeHtml(row.color || 'Unlabelled')}</span>`;
   return `
     <tr data-date="${row.date}" data-shift="${row.shift}" data-material="${escapeAttr(row.material)}" data-color="${escapeAttr(row.color)}" data-row-key="${escapeAttr(row.rowKey)}">
       <td></td>
       <td class="color-cell">
-        <input data-row-id="${escapeAttr(row.id)}" data-field="color" value="${escapeAttr(row.color)}" ${locked || row.fixed ? 'readonly' : ''}>
+        ${colorLabel}
       </td>
       <td>
         <input data-row-id="${escapeAttr(row.id)}" data-field="quantity" type="number" min="0" inputmode="numeric" value="${quantityValue(row.quantity)}" ${locked ? 'readonly' : ''}>
@@ -886,9 +1027,9 @@ function monthlyRows(month) {
     grouped.set(key, row);
   }
   for (const material of MATERIALS) {
-    for (const color of material.colors) {
-      const key = `${material.label}::${color}`;
-      if (!grouped.has(key)) grouped.set(key, { material: material.label, color, total: 0 });
+    for (const color of materialColorsFor(material.label)) {
+      const key = `${material.label}::${color.label}`;
+      if (!grouped.has(key)) grouped.set(key, { material: material.label, color: color.label, total: 0 });
     }
   }
   return Array.from(grouped.values()).sort((a, b) => `${a.material}${a.color}`.localeCompare(`${b.material}${b.color}`));
@@ -1046,10 +1187,16 @@ function bindEvents(root) {
     input.addEventListener('input', () => updateShiftField(input.dataset.shift, input.dataset.shiftField, input.value));
   });
   root.querySelectorAll('[data-add-color]').forEach((button) => {
-    button.addEventListener('click', () => {
-      const [shift, material] = button.dataset.addColor.split(':');
-      addColorRow(shift, material);
-    });
+    button.addEventListener('click', () => addMaterialColor(button.dataset.addColor));
+  });
+  root.querySelectorAll('[data-color-edit-material]').forEach((button) => {
+    button.addEventListener('click', () => renameMaterialColor(button.dataset.colorEditMaterial, button.dataset.colorEditLabel));
+  });
+  root.querySelectorAll('[data-color-delete-material]').forEach((button) => {
+    button.addEventListener('click', () => deleteMaterialColor(button.dataset.colorDeleteMaterial, button.dataset.colorDeleteLabel));
+  });
+  root.querySelector('[data-color-label]')?.addEventListener('input', (event) => {
+    if (state.colorModal) state.colorModal = { ...state.colorModal, label: event.currentTarget.value, error: '' };
   });
   root.querySelectorAll('[data-delete]').forEach((button) => {
     button.addEventListener('click', () => deleteRecord(button.dataset.delete));
@@ -1074,6 +1221,12 @@ function bindEvents(root) {
     root.querySelectorAll('[data-action]').forEach((element) => {
     element.addEventListener('click', async () => {
       const action = element.dataset.action;
+      if (action === 'color-cancel') {
+        state.colorModal = null;
+        render();
+      }
+      if (action === 'color-save') await saveMaterialColor();
+      if (action === 'color-delete-confirm') await confirmDeleteMaterialColor();
       if (action === 'shift-move-up' || action === 'shift-move-down') {
         await persistShiftOrder(moveShift(state.shiftOrder, element.dataset.shift, action === 'shift-move-up' ? -1 : 1));
       }
@@ -1128,6 +1281,15 @@ function bindEvents(root) {
       if (e.target === overlay) { state.formModal = null; render(); }
     });
     overlay.addEventListener('keydown', onKey);
+  });
+  root.querySelectorAll('[data-color-modal-overlay]').forEach((overlay) => {
+    overlay.addEventListener('click', (event) => {
+      if (event.target === overlay) { state.colorModal = null; render(); }
+    });
+    overlay.addEventListener('keydown', (event) => {
+      if (event.key === 'Escape') { state.colorModal = null; render(); }
+      if (event.key === 'Enter' && state.colorModal?.mode !== 'delete') saveMaterialColor();
+    });
   });
   if (state.formModal) {
     const picker = root.querySelector('[data-new-form-date]');
@@ -1189,6 +1351,25 @@ function applyRealtimeShiftOrder(payload) {
   scheduleRealtimeRender();
 }
 
+function applyRealtimeMaterialColor(payload) {
+  const row = payload.eventType === 'DELETE' ? payload.old : payload.new;
+  if (!row?.material) return;
+  if (readMutationQueue().some((mutation) => mutation.type.endsWith('-material-color') && mutation.material === row.material)) return;
+  if (payload.eventType === 'DELETE') {
+    state.materialColors = state.materialColors.filter((item) => item.material !== row.material || item.label !== row.label);
+  } else {
+    const previousLabel = payload.old?.label;
+    state.materialColors = state.materialColors.filter((item) =>
+      item.material !== row.material || (item.label !== row.label && item.label !== previousLabel));
+    state.materialColors = normalizeMaterialColors([...state.materialColors, {
+      material: row.material,
+      label: row.label,
+      displayOrder: row.display_order,
+    }]);
+  }
+  scheduleRealtimeRender();
+}
+
 function applyRealtimeRecord(payload) {
   if (payload.eventType === 'DELETE') {
     const id = payload.old?.id;
@@ -1199,7 +1380,7 @@ function applyRealtimeRecord(payload) {
   }
   const row = payload.new;
   if (!row?.id || queueHasRecordMutation(row.id)) return;
-  const record = normalizeRecord({
+  let record = normalizeRecord({
     ...row,
     rowKey: row.row_key,
     laundryPersonnel: row.laundry_personnel,
@@ -1210,6 +1391,9 @@ function applyRealtimeRecord(payload) {
     updatedAt: row.updated_at,
     syncedAt: row.synced_at,
   });
+  for (const mutation of readMutationQueue().filter((item) => item.type === 'rename-material-color')) {
+    if (record.material === mutation.material && record.color === mutation.from) record = { ...record, color: mutation.to };
+  }
   const existing = state.records.find((item) => item.id === record.id);
   if (existing && new Date(existing.updatedAt || 0) > new Date(record.updatedAt || 0)) return;
   updateLocalRecord(record);
@@ -1267,13 +1451,17 @@ async function startRealtime() {
         .on('postgres_changes', { event: '*', schema: 'public', table: 'locks' }, applyRealtimeLock)
         .on('postgres_changes', { event: '*', schema: 'public', table: 'daily_forms' }, applyRealtimeDailyForm)
         .on('postgres_changes', { event: '*', schema: 'public', table: 'shift_orders' }, applyRealtimeShiftOrder)
+        .on('postgres_changes', { event: '*', schema: 'public', table: 'material_colors' }, applyRealtimeMaterialColor)
         .subscribe((status) => {
           state.realtimeConnected = status === 'SUBSCRIBED';
+          if (state.realtimeConnected) clearTimeout(materialColorPollTimer);
+          else scheduleMaterialColorPolling();
           renderStatusOnly();
           if (status === 'SUBSCRIBED') hydrateFromServer();
         });
     } catch {
       state.realtimeConnected = false;
+      scheduleMaterialColorPolling();
     }
   })();
   try {
@@ -1281,6 +1469,28 @@ async function startRealtime() {
   } finally {
     realtimeStartPromise = null;
   }
+}
+
+function scheduleMaterialColorPolling() {
+  clearTimeout(materialColorPollTimer);
+  if (!navigator.onLine || state.realtimeConnected) return;
+  materialColorPollTimer = setTimeout(async () => {
+    try {
+      const result = await api('api/material-colors');
+      const pending = readMutationQueue().filter((mutation) => mutation.type.endsWith('-material-color'));
+      const latest = pending.reduce((rows, mutation) => applyMaterialColorMutation(rows, mutation),
+        normalizeMaterialColors(result.materialColors));
+      if (JSON.stringify(latest) !== JSON.stringify(state.materialColors)) {
+        const db = await api('api/records');
+        mergeServerState(db);
+        saveLocal();
+        if (!document.hidden) render();
+      }
+    } catch {
+      state.apiConnected = false;
+    }
+    scheduleMaterialColorPolling();
+  }, 5000);
 }
 
 window.addEventListener('online', () => {
@@ -1292,12 +1502,14 @@ window.addEventListener('online', () => {
   serverReconnectDelay = 1000;
   renderStatusOnly();
   startRealtime();
+  scheduleMaterialColorPolling();
   hydrateFromServer();
 });
 
 window.addEventListener('offline', () => {
   state.online = false;
   state.apiConnected = false;
+  clearTimeout(materialColorPollTimer);
   render();
 });
 
@@ -1330,4 +1542,5 @@ if ('serviceWorker' in navigator) {
 loadLocal();
 render();
 startRealtime();
+scheduleMaterialColorPolling();
 hydrateFromServer();

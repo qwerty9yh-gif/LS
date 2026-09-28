@@ -87,6 +87,19 @@ model ShiftOrder {
   @@map("shift_orders")
 }
 
+model MaterialColor {
+  id           Int      @id @default(autoincrement())
+  material     String
+  label        String
+  displayOrder Int      @map("display_order")
+  createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt    DateTime @default(now()) @map("updated_at") @db.Timestamptz(6)
+
+  @@unique([material, label], map: "material_colors_material_label_key")
+  @@index([material, displayOrder], map: "idx_material_colors_material_order")
+  @@map("material_colors")
+}
+
 model SyncEvent {
   id     Int      @id @default(autoincrement())
   at     DateTime @default(now()) @db.Timestamptz(6)
