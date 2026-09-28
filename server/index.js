@@ -245,24 +245,38 @@ async function verifyRecordColumns(client) {
   }
 }
 
+async function applyStatement(client, stmt, { tolerateMissingColumn = false } = {}) {
+  try {
+    await client.query(stmt);
+  } catch (stmtErr) {
+    const code = stmtErr?.code;
+    const msg = stmtErr?.message || '';
+    if (code === '42P07' || code === '42710' || code === '42701' || /already exists/i.test(msg)) return;
+    if (tolerateMissingColumn && code === '42703' && /does not exist/i.test(msg)) {
+      // Index on a column this schema version does not add — skip it instead of
+      // aborting init (aborting made every later request 500).
+      console.warn('Skipping index, column missing:', stmt.replace(/\s+/g, ' ').slice(0, 90));
+      return;
+    }
+    throw new Error(`Schema statement failed [${code || 'no-code'}]: ${msg}\nStatement: ${stmt.slice(0, 160)}`);
+  }
+}
+
 async function applySchema() {
   const schema = await readFile(schemaPath, 'utf8');
   const statements = splitSqlStatements(schema).filter((stmt) => stmt && !/^--/.test(stmt));
+  // Apply CREATE/ALTER statements first, heal any missing column, and create
+  // indexes LAST: an index may reference a column that only a later ALTER adds
+  // (older public.records had no color/row_key/signature), and running it early
+  // failed with 42703 which aborted schema init for the whole process.
+  const isIndex = (stmt) => /^\s*CREATE\s+(?:UNIQUE\s+)?INDEX/i.test(stmt);
+  const structural = statements.filter((stmt) => !isIndex(stmt));
+  const indexes = statements.filter(isIndex);
   const client = await pool.connect();
   try {
-    for (const stmt of statements) {
-      try {
-        await client.query(stmt);
-      } catch (stmtErr) {
-        const code = stmtErr?.code;
-        const msg = stmtErr?.message || '';
-        if (code === '42P07' || code === '42710' || code === '42701' || /already exists/i.test(msg)) {
-          continue;
-        }
-        throw new Error(`Schema statement failed [${code || 'no-code'}]: ${msg}\nStatement: ${stmt.slice(0, 160)}`);
-      }
-    }
+    for (const stmt of structural) await applyStatement(client, stmt);
     await verifyRecordColumns(client);
+    for (const stmt of indexes) await applyStatement(client, stmt, { tolerateMissingColumn: true });
   } finally {
     client.release();
   }
@@ -291,80 +305,76 @@ function toDateOnly(val) {
   return val;
 }
 
-function dbRecordToApi(row) {
-  return {
-    id: row.id,
-    date: toDateOnly(row.date),
-    shift: row.shift,
-    material: row.material,
-    color: row.color || '',
-    rowKey: row.row_key || '',
-    quantity: row.quantity === null || row.quantity === undefined ? null : Number(row.quantity),
-    laundryPersonnel: row.laundry_personnel,
-    verifiedBy: row.verified_by,
-    signature: row.signature || '',
-    status: row.status,
-    syncStatus: row.sync_status,
-    syncError: row.sync_error,
-    createdAt: row.created_at,
-    updatedAt: row.updated_at,
-    syncedAt: row.synced_at,
-  };
-}
-
 function prismaRecordToApi(row) {
+  if (!row) return row;
+  // Accept both Prisma camelCase (live path) and legacy pg snake_case rows
+  // (background Google-sync merge can still hand us raw rows), so the sync
+  // status flip never crashes on `updatedAt`/`createdAt` naming.
+  const date = row.date;
+  const shift = row.shift;
   return {
     id: row.id,
-    date: toDateOnly(row.date),
-    shift: row.shift,
+    date: toDateOnly(date),
+    shift,
     material: row.material,
     color: row.color || '',
-    rowKey: row.rowKey || '',
+    rowKey: row.rowKey ?? row.row_key ?? '',
     quantity: row.quantity === null || row.quantity === undefined ? null : Number(row.quantity),
-    laundryPersonnel: row.laundryPersonnel,
-    verifiedBy: row.verifiedBy,
+    laundryPersonnel: row.laundryPersonnel ?? row.laundry_personnel,
+    verifiedBy: row.verifiedBy ?? row.verified_by,
     signature: row.signature || '',
     status: row.status,
-    syncStatus: row.syncStatus,
-    syncError: row.syncError,
-    createdAt: row.createdAt,
-    updatedAt: row.updatedAt,
-    syncedAt: row.syncedAt,
+    syncStatus: row.syncStatus ?? row.sync_status,
+    syncError: row.syncError ?? row.sync_error ?? '',
+    createdAt: row.createdAt ?? row.created_at,
+    updatedAt: row.updatedAt ?? row.updated_at,
+    syncedAt: row.syncedAt ?? row.synced_at ?? null,
   };
 }
 
-function dbLockToApi(row) {
+function prismaLockToApi(row) {
+  if (!row) return row;
   return {
     id: row.id,
     key: `${toDateOnly(row.date)}:${row.shift}`,
     date: toDateOnly(row.date),
     shift: row.shift,
-    lockedAt: row.locked_at,
+    lockedAt: row.lockedAt ?? row.locked_at,
     reason: row.reason,
   };
 }
 
-function dbSyncEventToApi(row) {
+function prismaSyncEventToApi(row) {
   return { at: row.at, status: row.status, error: row.error, detail: row.detail };
 }
 
-// ─── PostgreSQL data access (replaces JSON file readDb / writeDb) ─────────────
+// Aliases for the single legacy reader still referencing db* names.
+const dbRecordToApi = prismaRecordToApi;
+const dbLockToApi = prismaLockToApi;
+const dbSyncEventToApi = prismaSyncEventToApi;
+
+// ─── PostgreSQL reads (Prisma-first, JSON fallback for local dev) ─────────────
+// PRODUCTION SAFETY: this function performs READS ONLY. It never deletes,
+// truncates, or overwrites rows. The legacy `writeDb()` full-snapshot rewrite
+// was removed for that reason — the JSON fallback branch is local-dev only
+// (no DATABASE_URL) and is the only place files are written.
 async function readDb() {
   if (hasDb()) {
     await ensureSchema();
-    const [recordsRes, locksRes, syncEventsRes, formsRes] = await Promise.all([
-      pool.query('SELECT * FROM records ORDER BY date DESC, shift, material, row_key, color'),
-      pool.query('SELECT * FROM locks ORDER BY locked_at DESC'),
-      pool.query('SELECT * FROM sync_events ORDER BY at DESC LIMIT 200'),
-      pool.query('SELECT * FROM daily_forms ORDER BY date DESC').catch(() => ({ rows: [] })),
+    // Prisma reads through the validated client (no SELECT *, no raw SQL).
+    const [records, locks, syncEvents, forms] = await Promise.all([
+      prisma.record.findMany({ orderBy: [{ date: 'desc' }, { shift: 'asc' }, { material: 'asc' }, { rowKey: 'asc' }, { color: 'asc' }] }),
+      prisma.lock.findMany({ orderBy: { lockedAt: 'desc' } }),
+      prisma.syncEvent.findMany({ orderBy: { at: 'desc' }, take: 200 }),
+      prisma.dailyForm.findMany({ orderBy: { date: 'desc' } }).catch(() => []),
     ]);
     const db = {
-      records: recordsRes.rows.map(dbRecordToApi),
-      locks: locksRes.rows.map(dbLockToApi),
-      syncEvents: syncEventsRes.rows.map(dbSyncEventToApi),
-      dailyForms: (formsRes.rows || []).map((row) => ({
+      records: records.map(prismaRecordToApi),
+      locks: locks.map(prismaLockToApi),
+      syncEvents: syncEvents.map(prismaSyncEventToApi),
+      dailyForms: forms.map((row) => ({
         date: toDateOnly(row.date),
-        createdAt: row.created_at,
+        createdAt: row.createdAt,
       })),
     };
     // Seed dailyForms from record dates so pre-existing days are recognised
@@ -378,7 +388,17 @@ async function readDb() {
     }
     return db;
   }
-  // Fallback: legacy JSON file
+  // Fallback: legacy JSON file (local dev only — never production)
+  return readJsonDb();
+}
+
+// Local-dev JSON fallback helpers (used ONLY when DATABASE_URL/DIRECT_URL are
+// unset). Production (hasDb()) never touches the filesystem store and never
+// calls writeJsonDb(). NOTE: the old writeDb() snapshot-rewrite is GONE — it
+// ran `DELETE FROM records WHERE id <> ALL($ids)` from a possibly-stale
+// in-memory snapshot, which is a data-loss risk on production. All production
+// writes are surgical Prisma upserts/deletes below (touch only incoming ids).
+async function readJsonDb() {
   if (!existsSync(dataDir)) await mkdir(dataDir, { recursive: true });
   if (!existsSync(dbPath)) {
     await writeFile(dbPath, JSON.stringify({ records: [], locks: [], syncEvents: [], dailyForms: [] }, null, 2));
@@ -395,94 +415,9 @@ async function readDb() {
   return fallback;
 }
 
-async function writeDb(db) {
-  if (hasDb()) {
-    await ensureSchema();
-    const tx = await pool.connect();
-    try {
-      await tx.query('BEGIN');
-      for (const rec of db.records) {
-        await tx.query(
-          `INSERT INTO records (id, date, shift, material, color, row_key, quantity, laundry_personnel, verified_by, signature, status, sync_status, sync_error, created_at, updated_at, synced_at)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
-           ON CONFLICT (id) DO UPDATE SET
-             date = EXCLUDED.date, shift = EXCLUDED.shift, material = EXCLUDED.material,
-             color = EXCLUDED.color, row_key = EXCLUDED.row_key, quantity = EXCLUDED.quantity,
-             laundry_personnel = EXCLUDED.laundry_personnel, verified_by = EXCLUDED.verified_by,
-             signature = EXCLUDED.signature, status = EXCLUDED.status,
-             sync_status = EXCLUDED.sync_status, sync_error = EXCLUDED.sync_error,
-             created_at = EXCLUDED.created_at, updated_at = EXCLUDED.updated_at,
-             synced_at = EXCLUDED.synced_at`,
-          [rec.id, rec.date, rec.shift, rec.material || '', rec.color || '', rec.rowKey || '',
-           rec.quantity === '' || rec.quantity === null || rec.quantity === undefined ? null : Number(rec.quantity),
-           rec.laundryPersonnel || '', rec.verifiedBy || '', rec.signature || '', rec.status || 'received',
-           rec.syncStatus || 'pending', rec.syncError || '', rec.createdAt, rec.updatedAt, rec.syncedAt || null]
-        );
-      }
-      // Delete rows missing from the in-memory snapshot so DELETE endpoints
-      // actually remove rows. A snapshot can only delete the ids it knows
-      // about, so restrict the DELETE to those ids — this keeps concurrent
-      // writers (e.g. the background Google-sync finishing after a delete)
-      // from resurrecting or wiping each other's rows.
-      if (db.records.length > 0) {
-        await tx.query(
-          'DELETE FROM records WHERE id <> ALL($1)',
-          [db.records.map((r) => r.id)]
-        );
-      }
-      for (const lock of db.locks) {
-        await tx.query(
-          `INSERT INTO locks (date, shift, locked_at, reason)
-           VALUES ($1,$2,$3,$4)
-           ON CONFLICT (date, shift) DO UPDATE SET
-             locked_at = EXCLUDED.locked_at, reason = EXCLUDED.reason`,
-          [lock.date, lock.shift, lock.lockedAt, lock.reason || 'Shift closed']
-        );
-      }
-      // sync_events is append-only in memory (each write appends new events),
-      // so only INSERT the newest events instead of wiping the table. Wiping
-      // + re-inserting raced with concurrent writers and resurrected deleted
-      // records via stale snapshots.
-      const newEvents = (db.syncEvents || []).slice(-5);
-      for (const ev of newEvents) {
-        const at = ev.at || new Date().toISOString();
-        const status = ev.status || '';
-        const error = ev.error || null;
-        const existing = await tx.query(
-          `SELECT id FROM sync_events
-            WHERE at = $1 AND status = $2 AND COALESCE(error, '') = COALESCE($3, '')
-            LIMIT 1`,
-          [at, status, error]
-        );
-        if (existing.rowCount > 0) continue;
-        await tx.query(
-          'INSERT INTO sync_events (at, status, error, detail) VALUES ($1,$2,$3,$4)',
-          [at, status, error, ev.detail ? JSON.stringify(ev.detail) : null]
-        );
-      }
-      // Persist explicit daily forms (empty days included) so duplicate
-      // detection and date navigation work server-side as well.
-      for (const form of db.dailyForms || []) {
-        if (!isValidFormDate(form?.date)) continue;
-        await tx.query(
-          `INSERT INTO daily_forms (date, created_at)
-           VALUES ($1,$2)
-           ON CONFLICT (date) DO NOTHING`,
-          [form.date, form.createdAt ? new Date(form.createdAt) : new Date()]
-        );
-      }
-      await tx.query('COMMIT');
-    } catch (err) {
-      await tx.query('ROLLBACK');
-      throw err;
-    } finally {
-      tx.release();
-    }
-  } else {
-    // Fallback: legacy JSON file
-    if (!existsSync(dataDir)) await mkdir(dataDir, { recursive: true });
-    await writeFile(dbPath, JSON.stringify(db, null, 2));
-  }
+async function writeJsonDb(db) {
+  if (!existsSync(dataDir)) await mkdir(dataDir, { recursive: true });
+  await writeFile(dbPath, JSON.stringify(db, null, 2));
 }
 
 function cleanText(value) {
@@ -689,6 +624,20 @@ async function pullRecordsFromGoogle() {
   return (existing.data.values || []).map(sheetRowToRecord).filter(Boolean);
 }
 
+async function pruneSyncEvents(tx, keep = 200) {
+  // Sync events are an append-only audit log (never delete production rows).
+  // Only trim the oldest overflow if the table grows unbounded, keeping the
+  // newest `keep` rows. Returns number pruned (0 in normal operation).
+  const overflow = await tx.syncEvent.findMany({
+    orderBy: { at: 'desc' },
+    skip: keep,
+    select: { id: true },
+  });
+  if (!overflow.length) return 0;
+  const pruned = await tx.syncEvent.deleteMany({ where: { id: { in: overflow.map((row) => row.id) } } });
+  return pruned.count;
+}
+
 function mergeRecords(localRecords, remoteRecords) {
   const byId = new Map(localRecords.map((record) => [record.id, record]));
 
@@ -773,11 +722,11 @@ app.post('/api/auth/login', asyncHandler(async (req, res) => {
     return;
   }
   try {
-    const result = await pool.query(
-      'SELECT id, email, password_hash FROM users WHERE email = $1 LIMIT 1',
-      [email]
-    );
-    const user = result.rows[0];
+    const result = await prisma.user.findUnique({
+      where: { email },
+      select: { id: true, email: true, passwordHash: true },
+    });
+    const user = result && result.passwordHash ? { id: result.id, email: result.email, password_hash: result.passwordHash } : null;
     if (!user || !verifyPassword(password, user.password_hash)) {
       res.status(401).json({ ok: false, error: 'Incorrect email or password.' });
       return;
@@ -812,37 +761,59 @@ app.put('/api/records', asyncHandler(async (req, res) => {
           const quantity = record.quantity === '' || record.quantity === null || record.quantity === undefined
             ? null
             : Number(record.quantity);
-          const saved = await tx.$queryRaw`
-            INSERT INTO records (
-              id, date, shift, material, color, row_key, quantity,
-              laundry_personnel, verified_by, signature, status, sync_status,
-              sync_error, created_at, updated_at, synced_at
-            ) VALUES (
-              ${record.id}, ${date}, ${record.shift}::shift_type, ${record.material || ''},
-              ${record.color || ''}, ${record.rowKey || ''}, ${quantity},
-              ${record.laundryPersonnel || ''}, ${record.verifiedBy || ''},
-              ${record.signature || ''}, ${(record.status || 'received')}::record_status,
-              'pending'::sync_status, '', ${new Date(record.createdAt || now)}, clock_timestamp(), NULL
-            )
-            ON CONFLICT (id) DO UPDATE SET
-              date = EXCLUDED.date, shift = EXCLUDED.shift, material = EXCLUDED.material,
-              color = EXCLUDED.color, row_key = EXCLUDED.row_key, quantity = EXCLUDED.quantity,
-              laundry_personnel = EXCLUDED.laundry_personnel, verified_by = EXCLUDED.verified_by,
-              signature = EXCLUDED.signature, status = EXCLUDED.status,
-              sync_status = 'pending', sync_error = '', updated_at = clock_timestamp(), synced_at = NULL
-            RETURNING *
-          `;
+          // Prisma-only upsert (idempotent on client-generated id → safe to
+          // retry offline queue flushes without duplicates). clock_timestamp()
+          // is still the updated_at authority, set via a targeted raw update
+          // inside the same transaction; no snapshot rewrite, no mass delete.
+          const saved = await tx.record.upsert({
+            where: { id: record.id },
+            create: {
+              id: record.id,
+              date,
+              shift: record.shift,
+              material: record.material || '',
+              color: record.color || '',
+              rowKey: record.rowKey || '',
+              quantity,
+              laundryPersonnel: record.laundryPersonnel || '',
+              verifiedBy: record.verifiedBy || '',
+              signature: record.signature || '',
+              status: record.status || 'received',
+              syncStatus: 'pending',
+              syncError: '',
+              createdAt: new Date(record.createdAt || now),
+              updatedAt: new Date(now),
+              syncedAt: null,
+            },
+            update: {
+              date,
+              shift: record.shift,
+              material: record.material || '',
+              color: record.color || '',
+              rowKey: record.rowKey || '',
+              quantity,
+              laundryPersonnel: record.laundryPersonnel || '',
+              verifiedBy: record.verifiedBy || '',
+              signature: record.signature || '',
+              status: record.status || 'received',
+              syncStatus: 'pending',
+              syncError: '',
+              syncedAt: null,
+            },
+          });
+          await tx.$executeRaw`UPDATE records SET updated_at = clock_timestamp() WHERE id = ${record.id}`;
           await tx.dailyForm.upsert({
             where: { date },
             create: { date, createdAt: new Date(record.createdAt || now) },
             update: {},
           });
-          committed.push(dbRecordToApi(saved[0]));
+          const refreshed = await tx.record.findUnique({ where: { id: record.id } });
+          committed.push(prismaRecordToApi(refreshed || saved));
         }
         return committed;
       });
     } else {
-      const db = await readDb();
+      const db = await readJsonDb();
       const byId = new Map(db.records.map((record) => [record.id, record]));
       for (const record of cleaned) {
         const existing = byId.get(record.id);
@@ -858,9 +829,9 @@ app.put('/api/records', asyncHandler(async (req, res) => {
         }
       }
       db.records = Array.from(byId.values()).sort((a, b) => `${a.date}${a.shift}`.localeCompare(`${b.date}${b.shift}`));
-      await writeDb(db);
+      await writeJsonDb(db);
     }
-    const db = hasDb() ? null : await readDb();
+    const db = hasDb() ? null : await readJsonDb();
 
     // Respond immediately so the foreground request never blocks on the
     // Google Sheets export (which can be slow to time out). Run the export
@@ -869,6 +840,31 @@ app.put('/api/records', asyncHandler(async (req, res) => {
     // touch the synced ids and append one event, so concurrent deletes
     // cannot be undone.
     res.status(202).json({ ok: true, records: hasDb() ? savedRecords : db.records, sync: { status: 'pending' } });
+
+    if (!hasDb()) {
+      // Local-dev fallback: same bookkeeping against the JSON store. Never
+      // touch Prisma here — with no DATABASE_URL the client cannot connect.
+      try {
+        const result = await syncRecordsToGoogle(cleaned);
+        const syncedAt = new Date().toISOString();
+        const latest = await readJsonDb();
+        const ids = new Set(cleaned.map((record) => record.id));
+        latest.records = (latest.records || []).map((record) => (ids.has(record.id)
+          ? { ...record, syncStatus: 'synced', syncError: '', syncedAt }
+          : record));
+        latest.syncEvents = [...(latest.syncEvents || []), { at: syncedAt, status: 'synced', detail: result }].slice(-200);
+        await writeJsonDb(latest);
+      } catch (error) {
+        const latest = await readJsonDb();
+        const ids = new Set(cleaned.map((record) => record.id));
+        latest.records = (latest.records || []).map((record) => (ids.has(record.id)
+          ? { ...record, syncStatus: 'pending', syncError: error.message }
+          : record));
+        latest.syncEvents = [...(latest.syncEvents || []), { at: new Date().toISOString(), status: 'pending', error: error.message }].slice(-200);
+        await writeJsonDb(latest);
+      }
+      return;
+    }
 
     try {
       const result = await syncRecordsToGoogle(cleaned);
@@ -884,6 +880,7 @@ app.put('/api/records', asyncHandler(async (req, res) => {
         await tx.syncEvent.create({
           data: { at: new Date(syncedAt), status: 'synced', detail: result },
         });
+        await pruneSyncEvents(tx);
       });
     } catch (error) {
       await prisma.$transaction(async (tx) => {
@@ -893,7 +890,10 @@ app.put('/api/records', asyncHandler(async (req, res) => {
             data: { syncStatus: 'pending', syncError: error.message },
           });
         }
-        await tx.syncEvent.create({ data: { status: 'pending', error: error.message } });
+        await tx.syncEvent.create({
+          data: { at: new Date(), status: 'pending', error: error.message },
+        });
+        await pruneSyncEvents(tx);
       });
     }
   } catch (error) {
@@ -910,10 +910,10 @@ app.delete('/api/records/:id', asyncHandler(async (req, res) => {
     res.json({ ok: true, deleted: result.count });
     return;
   }
-  const db = await readDb();
+  const db = await readJsonDb();
   const before = db.records.length;
   db.records = db.records.filter((record) => record.id !== req.params.id);
-  await writeDb(db);
+  await writeJsonDb(db);
   res.json({ ok: true, deleted: before - db.records.length });
 }));
 
@@ -936,10 +936,10 @@ app.post('/api/locks', asyncHandler(async (req, res) => {
     res.json({ ok: true, locks: db.locks });
     return;
   }
-  const db = await readDb();
+  const db = await readJsonDb();
   if (!db.locks.some((item) => item.key === key)) {
     db.locks.push({ key, date, shift, lockedAt: new Date().toISOString(), reason: 'Shift closed' });
-    await writeDb(db);
+    await writeJsonDb(db);
   }
   res.json({ ok: true, locks: db.locks });
 }));
@@ -958,15 +958,18 @@ app.post('/api/daily-forms', asyncHandler(async (req, res) => {
   const createdAt = new Date().toISOString();
   if (hasDb()) {
     await ensureSchema();
-    const existing = await pool.query(
-      `SELECT to_char(date, 'YYYY-MM-DD') AS date, created_at AS "createdAt" FROM daily_forms WHERE date = $1
-       UNION
-       SELECT to_char(date, 'YYYY-MM-DD') AS date, MIN(created_at) AS "createdAt" FROM records WHERE date = $1 GROUP BY date
-       LIMIT 1`,
-      [date]
-    );
-    if (existing.rowCount > 0) {
-      res.status(200).json({ ok: false, exists: true, form: { date, createdAt: existing.rows[0].createdAt || createdAt } });
+    const existing = await prisma.dailyForm.findUnique({
+      where: { date: new Date(`${date}T00:00:00.000Z`) },
+      select: { date: true, createdAt: true },
+    });
+    const recordOnDate = existing ? null : await prisma.record.findFirst({
+      where: { date: new Date(`${date}T00:00:00.000Z`) },
+      orderBy: { createdAt: 'asc' },
+      select: { id: true, createdAt: true },
+    });
+    if (existing || recordOnDate) {
+      const stamp = existing?.createdAt || recordOnDate?.createdAt || createdAt;
+      res.status(200).json({ ok: false, exists: true, form: { date, createdAt: stamp } });
       return;
     }
     await prisma.dailyForm.upsert({
@@ -975,13 +978,13 @@ app.post('/api/daily-forms', asyncHandler(async (req, res) => {
       update: {},
     });
   } else {
-    const db = await readDb();
+    const db = await readJsonDb();
     if (formDateExists(db.dailyForms, db.records, date)) {
       res.status(200).json({ ok: false, exists: true, form: { date, createdAt } });
       return;
     }
     db.dailyForms = [...(db.dailyForms || []), { date, createdAt }];
-    await writeDb(db);
+    await writeJsonDb(db);
   }
   res.status(201).json({ ok: true, exists: false, form: { date, createdAt } });
 }));
@@ -1023,11 +1026,11 @@ app.post('/api/sync/retry', asyncHandler(async (_req, res) => {
       : record);
     db.records = mergeRecords(pushedRecords, remoteRecords);
     db.syncEvents.push({ at: syncedAt, status: 'synced', detail: { ...result, pulled: remoteRecords.length } });
-    await writeDb(db);
+    await writeJsonDb(db);
     res.json({ ok: true, sync: { status: 'synced', ...result, pulled: remoteRecords.length }, records: db.records });
   } catch (error) {
     db.syncEvents.push({ at: new Date().toISOString(), status: 'pending', error: error.message });
-    await writeDb(db);
+    await writeJsonDb(db);
     res.status(202).json({ ok: true, sync: { status: 'pending', error: error.message }, records: db.records });
   }
 }));
@@ -1057,11 +1060,11 @@ app.post('/api/sync/pull', asyncHandler(async (_req, res) => {
     const remoteRecords = await pullRecordsFromGoogle();
     db.records = mergeRecords(db.records, remoteRecords);
     db.syncEvents.push({ at: new Date().toISOString(), status: 'pulled', detail: { pulled: remoteRecords.length } });
-    await writeDb(db);
+    await writeJsonDb(db);
     res.json({ ok: true, sync: { status: 'pulled', pulled: remoteRecords.length }, records: db.records });
   } catch (error) {
     db.syncEvents.push({ at: new Date().toISOString(), status: 'pull-failed', error: error.message });
-    await writeDb(db);
+    await writeJsonDb(db);
     res.status(202).json({ ok: true, sync: { status: 'pending', error: error.message }, records: db.records });
   }
 }));
@@ -1091,7 +1094,10 @@ ensureSchema().then(() => {
   });
 }).catch((err) => {
   console.error('✖ PostgreSQL schema initialisation failed:', err.message);
-  console.warn('⚠ Falling back to legacy JSON file storage.');
+  // NOTE: this is NOT a working fallback. hasDb() is still true, so every API
+  // request re-runs ensureSchema() and answers 500 until the schema is fixed.
+  // Only a missing DATABASE_URL switches this process to the JSON store.
+  console.warn('⚠ PostgreSQL unreachable — API requests will fail with 500 until the schema is applied (run: npm run prisma:deploy or apply server/schema.sql).');
   app.listen(port, () => {
     console.log(`Laundry Tracking PWA running at http://localhost:${port}`);
   });

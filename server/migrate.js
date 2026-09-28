@@ -109,10 +109,17 @@ function splitSchemaStatements(sql) {
     current += ch;
   }
   if (current.trim()) statements.push(current.trim());
-  return statements.filter((stmt) => stmt && !/^--/.test(stmt));
+  return statements.filter((stmt) => {
+    const sql = stmt.replace(/^(?:\s+|--[^\n]*(?:\n|$)|\/\*[\s\S]*?\*\/)*/g, '').trim();
+    return sql.length > 0;
+  });
 }
 
 async function main() {
+  // `--schema-only` = apply the additive DDL and stop. Use this to heal a
+  // production database (missing columns / missing daily_forms) WITHOUT
+  // pushing the local data/records.json into it.
+  const schemaOnly = process.argv.slice(2).includes('--schema-only');
   const connectionString = process.env.DIRECT_URL || process.env.DATABASE_URL;
   if (!connectionString) {
     console.error('✖ DATABASE_URL (or DIRECT_URL) is not set in the environment.');
@@ -127,21 +134,43 @@ async function main() {
     // 1. Ensure schema exists. Statements run one-by-one on this dedicated
     // client (never one multi-statement query) so a mid-file failure cannot
     // silently leave `records` without its `color` column on the pooler.
-    console.log('→ Applying schema...');
+    // Indexes run last: an index may reference a column a later ALTER adds,
+    // and failing that statement used to abort the whole schema apply.
+    console.log('→ Applying schema...' + (schemaOnly ? ' (schema-only mode: no data is written)' : ''));
     const schema = await readFile(schemaPath, 'utf8');
-    for (const stmt of splitSchemaStatements(schema)) {
+    const statements = splitSchemaStatements(schema);
+    const isIndex = (stmt) => /^\s*CREATE\s+(?:UNIQUE\s+)?INDEX/i.test(stmt);
+    const runStatement = async (stmt, { tolerateMissingColumn = false } = {}) => {
       try {
         await client.query(stmt);
       } catch (stmtErr) {
         const code = stmtErr?.code;
         const msg = stmtErr?.message || '';
         if (code === '42P07' || code === '42710' || code === '42701' || /already exists/i.test(msg)) {
-          continue;
+          return;
+        }
+        if (tolerateMissingColumn && code === '42703' && /does not exist/i.test(msg)) {
+          console.warn('  ! skipped index (column missing):', String(stmt).replace(/\s+/g, ' ').slice(0, 90));
+          return;
         }
         throw new Error(`Schema statement failed [${code || 'no-code'}]: ${msg}\nStatement: ${String(stmt).slice(0, 160)}`);
       }
-    }
+    };
+    for (const stmt of statements.filter((s) => !isIndex(s))) await runStatement(stmt);
+    for (const stmt of statements.filter(isIndex)) await runStatement(stmt, { tolerateMissingColumn: true });
     console.log('  Schema applied.');
+
+    if (schemaOnly) {
+      const counts = await Promise.all([
+        prisma.record.count(),
+        prisma.lock.count(),
+        prisma.dailyForm.count(),
+        prisma.syncEvent.count(),
+      ]);
+      console.log(`✓ Schema healed. Untouched data counts: records=${counts[0]}, locks=${counts[1]}, daily_forms=${counts[2]}, sync_events=${counts[3]}`);
+      console.log('  (run "npm run migrate" without --schema-only to also import data/records.json)');
+      return;
+    }
 
     // 2. Check for legacy JSON data
     if (!existsSync(dbPath)) {

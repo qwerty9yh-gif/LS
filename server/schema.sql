@@ -54,6 +54,16 @@ CREATE TABLE IF NOT EXISTS records (
     synced_at       TIMESTAMPTZ
 );
 
+-- IMPORTANT: additive column fixes MUST stay above the CREATE INDEX lines.
+-- On a database whose records table predates color/row_key/signature, the
+-- CREATE TABLE IF NOT EXISTS above is a no-op, so the index on
+-- (date, material, color) failed with 42703 "column color does not exist",
+-- aborting schema init and making every API request return 500.
+ALTER TABLE records ADD COLUMN IF NOT EXISTS color TEXT NOT NULL DEFAULT '';
+ALTER TABLE records ADD COLUMN IF NOT EXISTS row_key TEXT NOT NULL DEFAULT '';
+ALTER TABLE records ADD COLUMN IF NOT EXISTS signature TEXT NOT NULL DEFAULT '';
+ALTER TABLE records ALTER COLUMN quantity DROP NOT NULL;
+
 CREATE INDEX IF NOT EXISTS idx_records_date        ON records (date);
 CREATE INDEX IF NOT EXISTS idx_records_shift       ON records (shift);
 CREATE INDEX IF NOT EXISTS idx_records_date_shift  ON records (date, shift);
@@ -61,10 +71,6 @@ CREATE INDEX IF NOT EXISTS idx_records_monthly     ON records (date, material, c
 CREATE INDEX IF NOT EXISTS idx_records_sync_status ON records (sync_status);
 CREATE INDEX IF NOT EXISTS idx_records_status      ON records (status);
 
-ALTER TABLE records ADD COLUMN IF NOT EXISTS color TEXT NOT NULL DEFAULT '';
-ALTER TABLE records ADD COLUMN IF NOT EXISTS row_key TEXT NOT NULL DEFAULT '';
-ALTER TABLE records ADD COLUMN IF NOT EXISTS signature TEXT NOT NULL DEFAULT '';
-ALTER TABLE records ALTER COLUMN quantity DROP NOT NULL;
 
 -- =========================================================================
 -- locks table
