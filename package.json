@@ -4,6 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "prestart": "prisma generate",
     "start": "node server/index.js",
     "migrate": "node server/migrate.js",
     "migrate:schema": "node server/migrate.js --schema-only",
@@ -23,10 +24,10 @@
     "dotenv": "^16.4.5",
     "express": "^4.19.2",
     "googleapis": "^140.0.1",
-    "pg": "^8.23.0"
+    "pg": "^8.23.0",
+    "prisma": "^6.19.3"
   },
   "devDependencies": {
-    "playwright": "^1.47.2",
-    "prisma": "^6.19.3"
+    "playwright": "^1.47.2"
   }
 }
