@@ -4,6 +4,7 @@ const SHIFTS = [
   { key: 'evening', label: 'Shift 3 (Straight Day Shift)', time: 'Straight day shift' },
   { key: 'night', label: 'Shift 4 (Night)', time: 'Night shift' }
 ];
+const DAILY_REGISTER_SHIFTS = [SHIFTS[3], SHIFTS[1], SHIFTS[2], SHIFTS[0]];
 
 // NOTE: Shift 3's storage key stays 'evening' everywhere (records, locks,
 // database enum, printed row ids) so existing rows keep working — only the
@@ -559,7 +560,7 @@ function renderDailyPage() {
           <span style="flex:1"></span>
           <button class="primary-button" data-action="print">Print This Day</button>
         </div>
-        ${SHIFTS.map((shift) => renderShiftBlock(shift)).join('')}
+        ${DAILY_REGISTER_SHIFTS.map((shift) => renderShiftBlock(shift)).join('')}
         <table class="overall-table" aria-label="Overall daily total">
           <tbody>
             <tr>
