@@ -65,8 +65,9 @@ from new revenue/invoices.
 Set current item/color prices in **Unit Price Settings**. The **Monthly Revenue**
 section groups saved records by exact month and active item/color, computes
 quantity × unit price, and reports a grand total. A monthly invoice asks for
-Bill To details and first-page physical-letterhead safe areas. The invoice gets
-a database-generated number; Customer ID is the same number. Issued invoice
+Bill To details. Invoice pages use the full available page height and include
+the company branding. The invoice gets a database-generated number; Customer
+ID is the same number. Issued invoice
 items, quantities, prices, customer/company information, and totals are saved
 as a financial snapshot. Use **Open Invoice** to preview an existing snapshot
 or **Print / Save as PDF** for A4 output. Configure fixed company information

@@ -918,10 +918,10 @@ app.post('/api/invoices', asyncHandler(async (req, res) => {
   const bottomSafeMm = Number(req.body?.bottomSafeMm);
   if (!isValidBillingMonth(month) || !billTo.recipientName
     || (billTo.email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(billTo.email))
-    || !Number.isInteger(topSafeMm) || topSafeMm < 10 || topSafeMm > 100
-    || !Number.isInteger(bottomSafeMm) || bottomSafeMm < 10 || bottomSafeMm > 100
+    || !Number.isInteger(topSafeMm) || topSafeMm < 0 || topSafeMm > 100
+    || !Number.isInteger(bottomSafeMm) || bottomSafeMm < 0 || bottomSafeMm > 100
     || topSafeMm + bottomSafeMm > 140) {
-    res.status(400).json({ ok: false, error: 'Enter a valid billing month and recipient; safe areas must be 10-100 mm each and no more than 140 mm combined.' });
+    res.status(400).json({ ok: false, error: 'Enter a valid billing month and recipient; page spacing must be 0-100 mm and no more than 140 mm combined.' });
     return;
   }
 

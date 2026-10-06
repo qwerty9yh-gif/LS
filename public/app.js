@@ -1136,10 +1136,8 @@ function renderInvoiceFormModal() {
           <label class="modal-label">City <input name="city" autocomplete="address-level2" maxlength="200" value="${value('city')}"></label>
           <label class="modal-label">Phone <input name="phone" type="tel" autocomplete="tel" maxlength="200" value="${value('phone')}"></label>
           <label class="modal-label invoice-form-wide">Email <input name="email" type="email" autocomplete="email" maxlength="200" value="${value('email')}"></label>
-          <label class="modal-label">Top safe area (mm) <input name="topSafeMm" type="number" min="10" max="100" step="1" required value="${escapeAttr(modal.topSafeMm ?? 45)}"></label>
-          <label class="modal-label">Bottom safe area (mm) <input name="bottomSafeMm" type="number" min="10" max="100" step="1" required value="${escapeAttr(modal.bottomSafeMm ?? 30)}"></label>
         </div>
-        <p class="billing-help">Safe areas reserve the physical letterhead space on page one. Later pages use a compact header and footer.</p>
+        <p class="billing-help">Invoice pages use the full available page height. The supplied company branding is included in the invoice design.</p>
         <p class="login-error invoice-form-error" data-invoice-error>${escapeHtml(modal.error || '')}</p>
         <div class="modal-actions">
           <button type="button" class="mini-button" data-action="cancel-invoice-form">Cancel</button>
@@ -1159,13 +1157,20 @@ function renderInvoicePreview() {
   if (!invoice) return '';
   const pages = invoicePages(invoice);
   const billTo = invoice.billTo || {};
-  const company = invoice.companyInfo || {};
+  const billToFields = [
+    ['Name', billTo.recipientName],
+    ['Company', billTo.companyName],
+    ['Street', billTo.street],
+    ['City', billTo.city],
+    ['Phone', billTo.phone],
+    ['Email', billTo.email],
+  ].filter(([, value]) => value);
   return `
     <section class="invoice-preview" aria-label="Invoice preview">
       <div class="invoice-preview-toolbar no-print">
         <div>
           <h2>Invoice Preview</h2>
-          <p class="subtle">A4 pages • reserved first-page letterhead areas • ${pages.length} page${pages.length === 1 ? '' : 's'}</p>
+          <p class="subtle">A4 pages • full-height invoice layout • ${pages.length} page${pages.length === 1 ? '' : 's'}</p>
         </div>
         <div class="invoice-preview-actions">
           <button type="button" class="mini-button" data-action="close-invoice-preview">Close Preview</button>
@@ -1177,12 +1182,7 @@ function renderInvoicePreview() {
           const first = pageIndex === 0;
           const last = pageIndex === pages.length - 1;
           return `
-            <article class="invoice-page ${first ? 'invoice-page-first' : 'invoice-page-continuation'}"
-              style="${first ? `--top-safe:${invoice.topSafeMm}mm;--bottom-safe:${invoice.bottomSafeMm}mm` : ''}">
-              ${first ? `<div class="invoice-safe-zone invoice-safe-zone-top">
-                <strong>${escapeHtml(company.name || 'Physical letterhead area')}</strong>
-                <span>${escapeHtml([company.poBox, company.address, company.phone, company.email].filter(Boolean).join(' · ') || `${invoice.topSafeMm} mm reserved for existing letterhead`)}</span>
-              </div>` : ''}
+            <article class="invoice-page ${first ? 'invoice-page-first' : 'invoice-page-continuation'}">
               <div class="invoice-page-content">
                 <header class="invoice-page-header">
                   ${first ? `<div class="invoice-brand-title"><img src="./brand-logo.png" alt="MK Business Company Ltd."><div><p class="invoice-eyebrow">MONTHLY LAUNDRY STATEMENT</p><h1>INVOICE</h1></div></div>` : `<strong class="invoice-continuation-title">Monthly Laundry Invoice</strong>`}
@@ -1194,14 +1194,12 @@ function renderInvoicePreview() {
                   </div>
                 </header>
                 ${first ? `
-                  <section class="invoice-bill-to">
+                  <section class="invoice-bill-to" aria-label="Bill To information">
                     <h2>Bill To</h2>
-                    ${billTo.recipientName ? `<strong>${escapeHtml(billTo.recipientName)}</strong>` : ''}
-                    ${billTo.companyName ? `<span>${escapeHtml(billTo.companyName)}</span>` : ''}
-                    ${billTo.street ? `<span>${escapeHtml(billTo.street)}</span>` : ''}
-                    ${billTo.city ? `<span>${escapeHtml(billTo.city)}</span>` : ''}
-                    ${billTo.phone ? `<span>${escapeHtml(billTo.phone)}</span>` : ''}
-                    ${billTo.email ? `<span>${escapeHtml(billTo.email)}</span>` : ''}
+                    <div class="invoice-bill-to-details">
+                      ${billToFields.map(([label, value]) => `
+                        <p><strong>${label}:</strong> <span>${escapeHtml(value)}</span></p>`).join('')}
+                    </div>
                   </section>` : ''}
                 <table class="invoice-table">
                   <thead><tr><th>Item</th><th>Color</th><th>Quantity</th><th>Unit Price</th><th>Amount</th></tr></thead>
@@ -1222,7 +1220,6 @@ function renderInvoicePreview() {
                   <span>Page ${pageIndex + 1} of ${pages.length}</span>
                 </footer>
               </div>
-              ${first ? `<div class="invoice-safe-zone invoice-safe-zone-bottom">Physical letterhead footer area · ${invoice.bottomSafeMm} mm reserved</div>` : ''}
             </article>`;
         }).join('')}
       </div>
@@ -1383,8 +1380,8 @@ async function createMonthlyInvoice(form) {
   const draft = {
     month: state.invoiceFormModal.month,
     billTo,
-    topSafeMm: Number(data.get('topSafeMm')),
-    bottomSafeMm: Number(data.get('bottomSafeMm')),
+    topSafeMm: 0,
+    bottomSafeMm: 0,
     error: '',
   };
   state.invoiceFormModal = draft;
@@ -1507,7 +1504,7 @@ function bindEvents(root) {
       const action = element.dataset.action;
       if (action === 'save-unit-prices') await saveUnitPrices(root);
       if (action === 'open-invoice-form') {
-        state.invoiceFormModal = { month: state.selectedMonth, billTo: {}, topSafeMm: 45, bottomSafeMm: 30, error: '' };
+        state.invoiceFormModal = { month: state.selectedMonth, billTo: {}, topSafeMm: 0, bottomSafeMm: 0, error: '' };
         render();
       }
       if (action === 'cancel-invoice-form') {

@@ -61,9 +61,7 @@ export function buildMonthlyRevenue({ records, materialColors, unitPrices, month
 
 export function paginateInvoiceLines(invoice) {
   const lines = Array.isArray(invoice.lineItems) ? invoice.lineItems : [];
-  const topSafeMm = Number(invoice.topSafeMm) || 0;
-  const bottomSafeMm = Number(invoice.bottomSafeMm) || 0;
-  const firstPageCapacity = Math.max(1, Math.floor((297 - topSafeMm - bottomSafeMm - 125) / 12));
+  const firstPageCapacity = Math.max(1, Math.floor((297 - 125) / 12));
   const remainder = lines.slice(firstPageCapacity);
   const pages = [lines.slice(0, firstPageCapacity)];
   while (remainder.length) pages.push(remainder.splice(0, 14));

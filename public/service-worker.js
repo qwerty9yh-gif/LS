@@ -1,4 +1,4 @@
-const CACHE_NAME = 'laundry-tracking-v12-mk-branding';
+const CACHE_NAME = 'laundry-tracking-v13-full-height-invoice';
 const APP_SHELL = [
   './',
   './config.js',

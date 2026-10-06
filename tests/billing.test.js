@@ -50,14 +50,14 @@ test('an active combination with quantity and no price is explicitly incomplete'
   assert.equal(result.lines.find((line) => line.material === 'Trousers' && line.color === 'Blue').amountCents, null);
 });
 
-test('invoice line pagination reserves first-page letterhead space and keeps continuation pages bounded', () => {
+test('invoice line pagination uses full first-page height and keeps continuation pages bounded', () => {
   const invoice = {
     topSafeMm: 45,
     bottomSafeMm: 30,
     lineItems: Array.from({ length: 40 }, (_, index) => ({ item: `Item ${index}` })),
   };
   const pages = paginateInvoiceLines(invoice);
-  assert.deepEqual(pages.map((page) => page.length), [8, 14, 14, 4]);
+  assert.deepEqual(pages.map((page) => page.length), [14, 14, 12]);
   assert.equal(pages.flat().length, invoice.lineItems.length);
   assert.deepEqual(paginateInvoiceLines({ ...invoice, lineItems: [] }), [[]]);
 });
