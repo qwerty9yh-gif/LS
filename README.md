@@ -11,11 +11,17 @@ PostgreSQL is the production source of truth. The UI-backed tables are:
 - `locks` - shift-level locks
 - `daily_forms` - explicit forms, including empty days
 - `shift_orders` - shared display order for the four shifts
-- `material_colors` - editable color labels scoped to fixed material categories
+- `material_colors` - active color labels scoped to fixed material categories
+- `unit_prices` - current prices by active item/color
+- `invoice_sequences` and `invoices` - stable invoice numbers and immutable billing snapshots
 - `sync_events` - append-only sync history
 - `users` - login accounts; password hashes are never sent to clients
 
-Monthly reports are calculated from records and do not need a separate table.
+Monthly revenue is calculated directly from records; invoice totals and line
+items are saved as immutable snapshots so later price/catalog changes cannot
+alter an issued invoice. Database additions are additive; the billing migration
+retires only the eight requested catalog variants and does not modify laundry
+records, users, or historical transactions.
 Runtime application writes use Prisma. `server/schema.sql` is the additive
 startup bootstrap; checked-in Prisma migrations are applied with
 `npm run prisma:deploy`. Never use a database reset against production.
@@ -25,6 +31,11 @@ startup bootstrap; checked-in Prisma migrations are applied with
 | `DATABASE_URL` | yes | PostgreSQL connection string |
 | `DIRECT_URL` | no | Session-mode PostgreSQL connection for migrations/setup |
 | `PORT` | no | HTTP port (default `4173`) |
+| `LAUNDRY_COMPANY_NAME` | no | Fixed company name printed in the invoice body, if supplied |
+| `LAUNDRY_COMPANY_PO_BOX` | no | Fixed company P.O. Box, if supplied |
+| `LAUNDRY_COMPANY_ADDRESS` | no | Fixed company address, if supplied |
+| `LAUNDRY_COMPANY_PHONE` | no | Fixed company phone, if supplied |
+| `LAUNDRY_COMPANY_EMAIL` | no | Fixed company email, if supplied |
 
 If no database URL is configured, the app uses the legacy JSON file for local
 development only.
@@ -43,6 +54,24 @@ record IDs, quantities, and timestamps are preserved. Deleting a label removes
 only its catalog entry. Existing rows remain visible in the register and
 reports. Add, rename, and delete operations queue locally while offline and
 replay through the Prisma API when connectivity returns.
+
+Bed Sheets (Blue, Cream, Green), Table Clothes (Blue, Cream), and Towels
+(Blue, Green, Yellow) are not active selections. Their historical record rows
+are retained, remain visible as read-only historical entries, and are excluded
+from new revenue/invoices.
+
+### Monthly revenue and invoices
+
+Set current item/color prices in **Unit Price Settings**. The **Monthly Revenue**
+section groups saved records by exact month and active item/color, computes
+quantity × unit price, and reports a grand total. A monthly invoice asks for
+Bill To details and first-page physical-letterhead safe areas. The invoice gets
+a database-generated number; Customer ID is the same number. Issued invoice
+items, quantities, prices, customer/company information, and totals are saved
+as a financial snapshot. Use **Open Invoice** to preview an existing snapshot
+or **Print / Save as PDF** for A4 output. Configure fixed company information
+with the optional server environment variables above. The physical letterhead
+itself is not reproduced in the invoice.
 
 ### Cross-device sync
 

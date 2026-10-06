@@ -11,7 +11,8 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { verifyPassword } from './auth.js';
 import { normalizeShift, formExists as formDateExists, isValidFormDate } from './forms.js';
 import { DEFAULT_SHIFT_ORDER, SHIFT_KEYS as ORDERABLE_SHIFT_KEYS, isCompleteShiftOrder, normalizeShiftOrder } from '../shift-order.js';
-import { DEFAULT_MATERIAL_COLORS, MATERIAL_LABELS, normalizeMaterialColors } from '../material-colors.js';
+import { DEFAULT_MATERIAL_COLORS, MATERIAL_LABELS, isRetiredMaterialColor, normalizeMaterialColors } from '../material-colors.js';
+import { buildMonthlyRevenue, formatCents, parsePriceCents } from '../billing.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -67,8 +68,7 @@ app.use(express.static(publicDir, {
 }));
 
 const shifts = new Set(['morning', 'afternoon', 'evening', 'night']);
-// Human-friendly labels stay in the frontend; Shift 3 is now presented as
-// "Shift 3 (Straight Day Shift)" while 'evening' remains the stored key.
+// 'evening' remains the stored Straight Day key for existing records.
 const statuses = new Set(['received', 'pending', 'dispatched']);
 const hasDb = () => Boolean(process.env.DATABASE_URL || process.env.DIRECT_URL);
 
@@ -287,7 +287,7 @@ async function applySchema() {
   await prisma.$transaction(DEFAULT_SHIFT_ORDER.map((shift, index) => prisma.shiftOrder.upsert({
     where: { shift },
     create: { shift, displayOrder: index + 1 },
-    update: {},
+    update: { displayOrder: index + 1 },
   })));
   if (await prisma.materialColor.count() === 0) {
     await prisma.materialColor.createMany({ data: DEFAULT_MATERIAL_COLORS, skipDuplicates: true });
@@ -360,6 +360,18 @@ function prismaSyncEventToApi(row) {
   return { at: row.at, status: row.status, error: row.error, detail: row.detail };
 }
 
+function sortRecords(records) {
+  const shiftOrder = new Map(DEFAULT_SHIFT_ORDER.map((shift, index) => [shift, index]));
+  return [...records].sort((left, right) => {
+    const dateOrder = String(right.date).slice(0, 10).localeCompare(String(left.date).slice(0, 10));
+    return dateOrder
+      || (shiftOrder.get(left.shift) ?? Number.MAX_SAFE_INTEGER) - (shiftOrder.get(right.shift) ?? Number.MAX_SAFE_INTEGER)
+      || String(left.material).localeCompare(String(right.material))
+      || String(left.rowKey || '').localeCompare(String(right.rowKey || ''))
+      || String(left.color || '').localeCompare(String(right.color || ''));
+  });
+}
+
 // Aliases for the single legacy reader still referencing db* names.
 const dbRecordToApi = prismaRecordToApi;
 const dbLockToApi = prismaLockToApi;
@@ -383,7 +395,7 @@ async function readDb() {
       prisma.materialColor.findMany({ orderBy: [{ material: 'asc' }, { displayOrder: 'asc' }, { label: 'asc' }] }),
     ]);
     const db = {
-      records: records.map(prismaRecordToApi),
+      records: sortRecords(records.map(prismaRecordToApi)),
       locks: locks.map(prismaLockToApi),
       syncEvents: syncEvents.map(prismaSyncEventToApi),
       shiftOrder: normalizeShiftOrder(shiftOrderRows.map((row) => row.shift)),
@@ -423,6 +435,9 @@ async function readJsonDb() {
   fallback.dailyForms = Array.isArray(fallback.dailyForms) ? fallback.dailyForms : [];
   fallback.shiftOrder = normalizeShiftOrder(fallback.shiftOrder);
   fallback.materialColors = normalizeMaterialColors(fallback.materialColors);
+  fallback.unitPrices = Array.isArray(fallback.unitPrices) ? fallback.unitPrices : [];
+  fallback.invoices = Array.isArray(fallback.invoices) ? fallback.invoices : [];
+  fallback.records = sortRecords(fallback.records || []);
   const seenFallback = new Set(fallback.dailyForms.map((form) => form?.date).filter(Boolean));
   for (const record of fallback.records || []) {
     if (record?.date && !seenFallback.has(record.date)) {
@@ -668,7 +683,7 @@ function mergeRecords(localRecords, remoteRecords) {
     }
   }
 
-  return Array.from(byId.values()).sort((a, b) => `${a.date}${a.shift}`.localeCompare(`${b.date}${b.shift}`));
+  return sortRecords(Array.from(byId.values()));
 }
 
 async function mergeGoogleRecordsIntoPostgres(localRecords, remoteRecords, syncedAt, event) {
@@ -763,11 +778,252 @@ app.get('/api/records', asyncHandler(async (_req, res) => {
   res.json(db);
 }));
 
+function isValidBillingMonth(month) {
+  return /^\d{4}-(0[1-9]|1[0-2])$/.test(String(month || ''));
+}
+
+function invoiceToApi(invoice) {
+  return {
+    ...invoice,
+    customerId: invoice.invoiceNumber,
+    grandTotalCents: invoice.grandTotalCents ?? invoice.grandTotal,
+    generatedAt: invoice.generatedAt instanceof Date ? invoice.generatedAt.toISOString() : invoice.generatedAt,
+  };
+}
+
+function companyInformation() {
+  return {
+    name: cleanText(process.env.LAUNDRY_COMPANY_NAME),
+    poBox: cleanText(process.env.LAUNDRY_COMPANY_PO_BOX),
+    address: cleanText(process.env.LAUNDRY_COMPANY_ADDRESS),
+    phone: cleanText(process.env.LAUNDRY_COMPANY_PHONE),
+    email: cleanText(process.env.LAUNDRY_COMPANY_EMAIL),
+  };
+}
+
+app.get('/api/billing', asyncHandler(async (_req, res) => {
+  if (hasDb()) {
+    await ensureSchema();
+    const [materialColors, unitPrices] = await Promise.all([
+      listMaterialColors(),
+      prisma.unitPrice.findMany({ orderBy: [{ material: 'asc' }, { color: 'asc' }] }),
+    ]);
+    res.json({
+      ok: true,
+      materialColors,
+      unitPrices: unitPrices.map((price) => ({
+        material: price.material,
+        color: price.color,
+        unitPrice: price.unitPrice.toFixed(2),
+      })),
+      companyInfo: companyInformation(),
+    });
+    return;
+  }
+  const db = await readJsonDb();
+  res.json({
+    ok: true,
+    materialColors: db.materialColors,
+    unitPrices: db.unitPrices,
+    companyInfo: companyInformation(),
+  });
+}));
+
+app.put('/api/unit-prices', asyncHandler(async (req, res) => {
+  if (!Array.isArray(req.body?.unitPrices)) {
+    res.status(400).json({ ok: false, error: 'Unit prices must be supplied as a list.' });
+    return;
+  }
+
+  const submitted = new Map();
+  for (const item of req.body.unitPrices) {
+    const material = cleanText(item?.material);
+    const color = cleanText(item?.color);
+    const cents = parsePriceCents(item?.unitPrice);
+    if (!MATERIAL_LABELS.includes(material) || !color || cents === null
+      || isRetiredMaterialColor(material, color)) {
+      res.status(400).json({ ok: false, error: 'Each unit price must use an active item/color and a non-negative price with up to two decimals.' });
+      return;
+    }
+    submitted.set(`${material}\u0000${color}`, { material, color, cents, value: formatCents(cents) });
+  }
+
+  if (hasDb()) {
+    await ensureSchema();
+    const materialColors = await listMaterialColors();
+    const active = new Set(materialColors.map((row) => `${row.material}\u0000${row.label}`));
+    if ([...submitted.keys()].some((key) => !active.has(key))) {
+      res.status(400).json({ ok: false, error: 'A unit price references a color that is no longer active.' });
+      return;
+    }
+    await prisma.$transaction(async (tx) => {
+      for (const item of submitted.values()) {
+        await tx.unitPrice.upsert({
+          where: { material_color: { material: item.material, color: item.color } },
+          create: { material: item.material, color: item.color, unitPrice: item.value },
+          update: { unitPrice: item.value, updatedAt: new Date() },
+        });
+      }
+      const activeKeys = new Set(materialColors.map((row) => `${row.material}\u0000${row.label}`));
+      const retainedKeys = new Set(submitted.keys());
+      for (const row of materialColors) {
+        const key = `${row.material}\u0000${row.label}`;
+        if (activeKeys.has(key) && !retainedKeys.has(key)) {
+          await tx.unitPrice.deleteMany({ where: { material: row.material, color: row.label } });
+        }
+      }
+    });
+    const unitPrices = await prisma.unitPrice.findMany({ orderBy: [{ material: 'asc' }, { color: 'asc' }] });
+    res.json({ ok: true, unitPrices: unitPrices.map((price) => ({
+      material: price.material, color: price.color, unitPrice: price.unitPrice.toFixed(2),
+    })) });
+    return;
+  }
+
+  const db = await readJsonDb();
+  const active = new Set(db.materialColors.map((row) => `${row.material}\u0000${row.label}`));
+  if ([...submitted.keys()].some((key) => !active.has(key))) {
+    res.status(400).json({ ok: false, error: 'A unit price references a color that is no longer active.' });
+    return;
+  }
+  const byKey = new Map(db.unitPrices
+    .filter((price) => !active.has(`${price.material}\u0000${price.color}`)
+      || submitted.has(`${price.material}\u0000${price.color}`))
+    .map((price) => [`${price.material}\u0000${price.color}`, price]));
+  for (const item of submitted.values()) byKey.set(`${item.material}\u0000${item.color}`, {
+    material: item.material, color: item.color, unitPrice: item.value,
+  });
+  db.unitPrices = [...byKey.values()];
+  await writeJsonDb(db);
+  res.json({ ok: true, unitPrices: db.unitPrices });
+}));
+
+app.get('/api/invoices', asyncHandler(async (_req, res) => {
+  if (hasDb()) {
+    await ensureSchema();
+    const invoices = await prisma.invoice.findMany({ orderBy: [{ generatedAt: 'desc' }, { invoiceNumber: 'desc' }] });
+    res.json({ ok: true, invoices: invoices.map(invoiceToApi) });
+    return;
+  }
+  const db = await readJsonDb();
+  res.json({ ok: true, invoices: db.invoices.map(invoiceToApi) });
+}));
+
+app.post('/api/invoices', asyncHandler(async (req, res) => {
+  const month = cleanText(req.body?.month);
+  const billTo = Object.fromEntries([
+    'recipientName', 'companyName', 'street', 'city', 'phone', 'email',
+  ].map((field) => [field, cleanText(req.body?.billTo?.[field]).slice(0, 200)]));
+  const topSafeMm = Number(req.body?.topSafeMm);
+  const bottomSafeMm = Number(req.body?.bottomSafeMm);
+  if (!isValidBillingMonth(month) || !billTo.recipientName
+    || (billTo.email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(billTo.email))
+    || !Number.isInteger(topSafeMm) || topSafeMm < 10 || topSafeMm > 100
+    || !Number.isInteger(bottomSafeMm) || bottomSafeMm < 10 || bottomSafeMm > 100
+    || topSafeMm + bottomSafeMm > 140) {
+    res.status(400).json({ ok: false, error: 'Enter a valid billing month and recipient; safe areas must be 10-100 mm each and no more than 140 mm combined.' });
+    return;
+  }
+
+  const startDate = new Date(`${month}-01T00:00:00.000Z`);
+  const nextMonth = new Date(Date.UTC(startDate.getUTCFullYear(), startDate.getUTCMonth() + 1, 1));
+  let records;
+  let materialColors;
+  let unitPrices;
+  if (hasDb()) {
+    await ensureSchema();
+    [records, materialColors, unitPrices] = await Promise.all([
+      prisma.record.findMany({
+        where: { date: { gte: startDate, lt: nextMonth } },
+        select: { date: true, material: true, color: true, quantity: true },
+      }),
+      listMaterialColors(),
+      prisma.unitPrice.findMany(),
+    ]);
+    records = records.map((record) => ({ ...record, date: toDateOnly(record.date) }));
+    unitPrices = unitPrices.map((price) => ({ ...price, unitPrice: price.unitPrice.toFixed(2) }));
+  } else {
+    const db = await readJsonDb();
+    records = db.records.filter((record) => String(record.date).slice(0, 7) === month);
+    materialColors = db.materialColors;
+    unitPrices = db.unitPrices;
+  }
+
+  const revenue = buildMonthlyRevenue({ records, materialColors, unitPrices, month });
+  if (!revenue.complete) {
+    res.status(409).json({ ok: false, error: 'Set a unit price for each active item/color with a quantity before generating this invoice.' });
+    return;
+  }
+
+  const lineItems = revenue.lines.filter((line) => line.quantity > 0).map((line) => ({
+    item: line.material,
+    color: line.color,
+    quantity: line.quantity,
+    unitPriceCents: line.unitPriceCents,
+    amountCents: line.amountCents,
+  }));
+  const snapshot = {
+    month,
+    generatedAt: new Date().toISOString(),
+    billTo,
+    companyInfo: companyInformation(),
+    lineItems,
+    grandTotalCents: revenue.grandTotalCents,
+    topSafeMm,
+    bottomSafeMm,
+  };
+  let saved;
+  if (hasDb()) {
+    saved = await prisma.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtext(${month})) IS NULL AS locked`;
+      const previous = await tx.invoiceSequence.upsert({
+        where: { month },
+        create: { month, lastNumber: 1 },
+        update: { lastNumber: { increment: 1 }, updatedAt: new Date() },
+      });
+      const invoiceNumber = `INV-${month.replace('-', '')}-${String(previous.lastNumber).padStart(6, '0')}`;
+      return tx.invoice.create({
+        data: {
+          invoiceNumber,
+          month,
+          generatedAt: new Date(snapshot.generatedAt),
+          billTo,
+          companyInfo: snapshot.companyInfo,
+          lineItems,
+          grandTotal: revenue.grandTotalCents,
+          topSafeMm,
+          bottomSafeMm,
+        },
+      });
+    });
+    saved = invoiceToApi({
+      invoiceNumber: saved.invoiceNumber,
+      month: saved.month,
+      generatedAt: saved.generatedAt,
+      billTo: saved.billTo,
+      companyInfo: saved.companyInfo,
+      lineItems: saved.lineItems,
+      grandTotalCents: saved.grandTotal,
+      topSafeMm: saved.topSafeMm,
+      bottomSafeMm: saved.bottomSafeMm,
+    });
+  } else {
+    const db = await readJsonDb();
+    const previous = db.invoices.filter((invoice) => invoice.month === month).length;
+    const invoiceNumber = `INV-${month.replace('-', '')}-${String(previous + 1).padStart(6, '0')}`;
+    saved = invoiceToApi({ invoiceNumber, ...snapshot });
+    db.invoices.push(saved);
+    await writeJsonDb(db);
+  }
+  res.status(201).json({ ok: true, invoice: saved });
+}));
+
 function isValidMaterialColor(material, label) {
   return MATERIAL_LABELS.includes(material)
     && Boolean(label)
     && label.length <= 50
-    && !/[\u0000-\u001f]/.test(label);
+    && !/[\u0000-\u001f]/.test(label)
+    && !isRetiredMaterialColor(material, label);
 }
 
 async function listMaterialColors(tx = prisma) {
@@ -929,8 +1185,8 @@ app.delete('/api/material-colors/:material/:label', asyncHandler(async (req, res
 
 app.put('/api/shift-order', asyncHandler(async (req, res) => {
   const order = req.body?.order;
-  if (!isCompleteShiftOrder(order)) {
-    res.status(400).json({ ok: false, error: 'Order must contain each of the four shifts exactly once.' });
+  if (!isCompleteShiftOrder(order) || order.some((shift, index) => shift !== DEFAULT_SHIFT_ORDER[index])) {
+    res.status(400).json({ ok: false, error: 'Shift order is fixed to Night, Morning, Straight Day, Afternoon.' });
     return;
   }
 
@@ -975,6 +1231,9 @@ app.put('/api/records', asyncHandler(async (req, res) => {
         for (const record of cleaned) {
           await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtext(${record.id})) IS NULL AS locked`;
           const existing = await tx.record.findUnique({ where: { id: record.id } });
+          if (isRetiredMaterialColor(record.material, record.color) && !existing) {
+            throw new Error(`${record.material} - ${record.color} is no longer available for new records.`);
+          }
           const incomingUpdatedAt = new Date(record.updatedAt);
           if (existing && incomingUpdatedAt.getTime() <= existing.updatedAt.getTime()) {
             committed.push(prismaRecordToApi(existing));
@@ -1041,6 +1300,9 @@ app.put('/api/records', asyncHandler(async (req, res) => {
       const byId = new Map(db.records.map((record) => [record.id, record]));
       for (const record of cleaned) {
         const existing = byId.get(record.id);
+        if (isRetiredMaterialColor(record.material, record.color) && !existing) {
+          throw new Error(`${record.material} - ${record.color} is no longer available for new records.`);
+        }
         byId.set(record.id, {
           ...existing,
           ...record,
@@ -1052,7 +1314,7 @@ app.put('/api/records', asyncHandler(async (req, res) => {
           db.dailyForms = [...(db.dailyForms || []), { date: record.date, createdAt: record.createdAt || new Date().toISOString() }];
         }
       }
-      db.records = Array.from(byId.values()).sort((a, b) => `${a.date}${a.shift}`.localeCompare(`${b.date}${b.shift}`));
+      db.records = sortRecords(Array.from(byId.values()));
       await writeJsonDb(db);
     }
     const db = hasDb() ? null : await readJsonDb();

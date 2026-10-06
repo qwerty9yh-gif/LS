@@ -2,28 +2,18 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { DEFAULT_SHIFT_ORDER, isCompleteShiftOrder, moveShift, normalizeShiftOrder, placeShift } from '../shift-order.js';
 
-test('the initial order matches the current daily register', () => {
-  assert.deepEqual(DEFAULT_SHIFT_ORDER, ['night', 'afternoon', 'evening', 'morning']);
+test('the standard order is Night, Morning, Straight Day, Afternoon', () => {
+  assert.deepEqual(DEFAULT_SHIFT_ORDER, ['night', 'morning', 'evening', 'afternoon']);
 });
 
-test('normalization removes invalid and duplicate keys and keeps all shifts', () => {
-  assert.deepEqual(normalizeShiftOrder(['morning', 'morning', 'unknown']), [
-    'morning', 'night', 'afternoon', 'evening'
-  ]);
+test('normalization ignores stored custom ordering', () => {
+  assert.deepEqual(normalizeShiftOrder(['afternoon', 'morning', 'night', 'evening']), DEFAULT_SHIFT_ORDER);
 });
 
-test('moveShift supports bounded up and down moves', () => {
-  assert.deepEqual(moveShift(DEFAULT_SHIFT_ORDER, 'night', 1), ['afternoon', 'night', 'evening', 'morning']);
+test('shift order cannot be changed by local reordering helpers', () => {
+  assert.deepEqual(moveShift(DEFAULT_SHIFT_ORDER, 'night', 1), DEFAULT_SHIFT_ORDER);
   assert.deepEqual(moveShift(DEFAULT_SHIFT_ORDER, 'morning', 1), DEFAULT_SHIFT_ORDER);
-});
-
-test('placeShift moves before or after any target', () => {
-  assert.deepEqual(placeShift(DEFAULT_SHIFT_ORDER, 'night', 'afternoon', true), [
-    'afternoon', 'night', 'evening', 'morning'
-  ]);
-  assert.deepEqual(placeShift(DEFAULT_SHIFT_ORDER, 'morning', 'night'), [
-    'morning', 'night', 'afternoon', 'evening'
-  ]);
+  assert.deepEqual(placeShift(DEFAULT_SHIFT_ORDER, 'morning', 'night'), DEFAULT_SHIFT_ORDER);
 });
 
 test('API order validation accepts only a complete permutation', () => {

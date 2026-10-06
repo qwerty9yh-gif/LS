@@ -1,16 +1,15 @@
 import { enqueueMutation, readMutationQueue, removeQueuedMutation } from './sync-queue.js';
 import { DEFAULT_SHIFT_ORDER, SHIFT_KEYS, isCompleteShiftOrder, moveShift, normalizeShiftOrder, placeShift } from './shift-order.js';
-import { DEFAULT_MATERIAL_COLORS, applyMaterialColorMutation, normalizeMaterialColors } from './material-colors.js';
+import { DEFAULT_MATERIAL_COLORS, applyMaterialColorMutation, isRetiredMaterialColor, normalizeMaterialColors } from './material-colors.js';
+import { buildMonthlyRevenue, formatCents, paginateInvoiceLines } from './billing.js';
 
 const SHIFTS = [
-  { key: 'morning', label: 'Shift 1 (Morning)', time: 'Morning shift' },
-  { key: 'afternoon', label: 'Shift 2 (Afternoon)', time: 'Afternoon shift' },
-  { key: 'evening', label: 'Shift 3 (Straight Day Shift)', time: 'Straight day shift' },
-  { key: 'night', label: 'Shift 4 (Night)', time: 'Night shift' }
+  { key: 'morning', label: 'Morning', time: 'Morning shift' },
+  { key: 'afternoon', label: 'Afternoon', time: 'Afternoon shift' },
+  { key: 'evening', label: 'Straight Day', time: 'Straight day shift' },
+  { key: 'night', label: 'Night', time: 'Night shift' }
 ];
-// NOTE: Shift 3's storage key stays 'evening' everywhere (records, locks,
-// database enum, printed row ids) so existing rows keep working — only the
-// user-facing label changed to "Shift 3 (Straight Day Shift)".
+// The 'evening' key remains the stored Straight Day shift for existing rows.
 
 const MATERIALS = [
   { key: 'shirts', label: 'Shirts' },
@@ -54,6 +53,13 @@ let state = {
   dailyForms: [],
   materialColors: normalizeMaterialColors(DEFAULT_MATERIAL_COLORS),
   shiftOrder: [...DEFAULT_SHIFT_ORDER],
+  unitPrices: [],
+  priceDraft: {},
+  invoices: [],
+  companyInfo: {},
+  selectedMonth: todayIso().slice(0, 7),
+  invoiceFormModal: null,
+  invoicePreview: null,
   formModal: null,
   colorModal: null,
   online: navigator.onLine,
@@ -85,7 +91,28 @@ function loadLocal() {
       }
     }
     const saved = JSON.parse(raw || '{}');
-    state = { ...state, ...saved, tab: saved.tab || 'daily', selectedDate: saved.selectedDate || todayIso(), dailyForms: Array.isArray(saved.dailyForms) ? saved.dailyForms : [], materialColors: normalizeMaterialColors(saved.materialColors), shiftOrder: normalizeShiftOrder(saved.shiftOrder), formModal: null, colorModal: null, online: navigator.onLine, syncing: false };
+    state = {
+      ...state,
+      ...saved,
+      tab: saved.tab || 'daily',
+      selectedDate: saved.selectedDate || todayIso(),
+      dailyForms: Array.isArray(saved.dailyForms) ? saved.dailyForms : [],
+      materialColors: normalizeMaterialColors(saved.materialColors),
+      shiftOrder: normalizeShiftOrder(saved.shiftOrder),
+      unitPrices: Array.isArray(saved.unitPrices) ? saved.unitPrices : [],
+      priceDraft: {},
+      invoices: Array.isArray(saved.invoices) ? saved.invoices : [],
+      companyInfo: saved.companyInfo || {},
+      selectedMonth: /^\d{4}-\d{2}$/.test(saved.selectedMonth)
+        ? saved.selectedMonth
+        : String(saved.selectedDate || todayIso()).slice(0, 7),
+      invoiceFormModal: null,
+      invoicePreview: null,
+      formModal: null,
+      colorModal: null,
+      online: navigator.onLine,
+      syncing: false
+    };
   } catch {
     saveLocal();
   }
@@ -101,6 +128,9 @@ function saveLocal() {
     dailyForms: state.dailyForms,
     materialColors: state.materialColors,
     shiftOrder: state.shiftOrder,
+    unitPrices: state.unitPrices,
+    invoices: state.invoices,
+    selectedMonth: state.selectedMonth,
     notice: state.notice
   }));
 }
@@ -146,10 +176,18 @@ async function hydrateFromServer() {
   if (hydratePromise) return hydratePromise;
   hydratePromise = (async () => {
     try {
-      const db = await api('api/records');
+      const [db, billing, invoices] = await Promise.all([
+        api('api/records'),
+        api('api/billing'),
+        api('api/invoices'),
+      ]);
       clearTimeout(serverReconnectTimer);
       serverReconnectDelay = 1000;
       mergeServerState(db);
+      state.unitPrices = billing.unitPrices || [];
+      state.priceDraft = {};
+      state.companyInfo = billing.companyInfo || {};
+      state.invoices = invoices.invoices || [];
       state.notice = '';
     } catch {
       state.apiConnected = false;
@@ -428,6 +466,7 @@ function isValidColorLabel(material, label) {
   return MATERIALS.some((item) => item.label === material)
     && Boolean(label)
     && label.length <= 50
+    && !isRetiredMaterialColor(material, label)
     && !/[\u0000-\u001f]/.test(label);
 }
 
@@ -542,14 +581,12 @@ async function flushMutationQueue() {
           });
           if (result.form) registerDailyForm(result.form.date);
         } else if (mutation.type === 'set-shift-order') {
+          const order = [...DEFAULT_SHIFT_ORDER];
           const result = await api('api/shift-order', {
             method: 'PUT',
-            body: JSON.stringify({ order: mutation.order })
+            body: JSON.stringify({ order })
           });
-          const laterOrder = readMutationQueue()
-            .filter((item) => item.id !== mutation.id && item.type === 'set-shift-order')
-            .at(-1);
-          state.shiftOrder = normalizeShiftOrder(laterOrder?.order || result.order || mutation.order);
+          state.shiftOrder = normalizeShiftOrder(result.order || order);
         } else if (mutation.type.endsWith('-material-color')) {
           let result;
           if (mutation.type === 'create-material-color') {
@@ -721,16 +758,23 @@ function render() {
         <nav class="tabs no-print" aria-label="Main navigation">
           <button class="tab ${state.tab === 'daily' ? 'active' : ''}" data-tab="daily">Daily Register</button>
           <button class="tab ${state.tab === 'records' ? 'active' : ''}" data-tab="records">Daily Records</button>
-          <button class="tab ${state.tab === 'monthly' ? 'active' : ''}" data-tab="monthly">Monthly Tracking</button>
+          <button class="tab ${state.tab === 'monthly' ? 'active' : ''}" data-tab="monthly">MONTHLY REVENUE</button>
+          <button class="tab ${state.tab === 'prices' ? 'active' : ''}" data-tab="prices">Unit Price Settings</button>
         </nav>
         <p class="sync-note no-print" data-notice>${escapeHtml(state.notice || '')}</p>
-        ${state.tab === 'records' ? renderRecordsPage() : state.tab === 'monthly' ? renderMonthlyPage() : renderDailyPage()}
+        ${state.tab === 'records' ? renderRecordsPage()
+          : state.tab === 'monthly' ? renderMonthlyPage()
+            : state.tab === 'prices' ? renderUnitPricePage()
+              : renderDailyPage()}
       </main>
       ${renderColorModal()}
+      ${renderInvoiceFormModal()}
+      ${renderInvoicePreview()}
     </div>
   `;
   bindEvents(root);
   if (state.colorModal && state.colorModal.mode !== 'delete') root.querySelector('[data-color-label]')?.focus();
+  if (state.invoiceFormModal) root.querySelector('[data-bill-to-name]')?.focus();
 }
 
 function installModeText() {
@@ -767,7 +811,7 @@ function renderDailyPage() {
           <button class="primary-button" data-action="print">Print This Day</button>
         </div>
         <div class="shift-list" data-shift-list>
-          ${orderedDailyShifts().map((shift, index, shifts) => renderShiftBlock(shift, index, shifts.length)).join('')}
+          ${orderedDailyShifts().map((shift) => renderShiftBlock(shift)).join('')}
         </div>
         <table class="overall-table" aria-label="Overall daily total">
           <tbody>
@@ -844,7 +888,7 @@ function renderColorModal() {
   `;
 }
 
-function renderShiftBlock(shift, orderIndex, shiftCount) {
+function renderShiftBlock(shift) {
   const rows = canonicalRows(state.selectedDate, shift.key);
   const archived = archivedRows(state.selectedDate, shift.key);
   const locked = isLocked(state.selectedDate, shift.key);
@@ -878,11 +922,6 @@ function renderShiftBlock(shift, orderIndex, shiftCount) {
             <td colspan="2" class="shift-heading">
               <div class="shift-heading-content">
                 <span>${shift.label}</span>
-                <span class="shift-order-controls no-print">
-                  <button class="mini-button" data-action="shift-move-up" data-shift="${shift.key}" aria-label="Move ${shift.label} up" title="Move up" ${orderIndex === 0 ? 'disabled' : ''}>↑</button>
-                  <button class="shift-drag-handle" type="button" data-shift-drag="${shift.key}" aria-label="Drag ${shift.label} to reorder" title="Drag to reorder">⠿</button>
-                  <button class="mini-button" data-action="shift-move-down" data-shift="${shift.key}" aria-label="Move ${shift.label} down" title="Move down" ${orderIndex === shiftCount - 1 ? 'disabled' : ''}>↓</button>
-                </span>
               </div>
             </td>
             <td>
@@ -943,9 +982,10 @@ function renderMaterialRows(shift, material, allRows, locked) {
 function renderColorRow(row, locked) {
   const canDelete = !row.fixed;
   const colorIsManaged = materialColorsFor(row.material).some((item) => item.label === row.color);
+  const isRetiredHistory = isRetiredMaterialColor(row.material, row.color);
   const colorLabel = colorIsManaged
     ? `<span class="color-label-controls"><button class="color-label-button no-print" data-color-edit-material="${escapeAttr(row.material)}" data-color-edit-label="${escapeAttr(row.color)}">${escapeHtml(row.color)}</button><button class="color-delete-button no-print" data-color-delete-material="${escapeAttr(row.material)}" data-color-delete-label="${escapeAttr(row.color)}" aria-label="Delete ${escapeAttr(row.color)} from ${escapeAttr(row.material)}" title="Delete color">×</button></span>`
-    : `<span class="retired-color-label">${escapeHtml(row.color || 'Unlabelled')}</span>`;
+    : `<span class="retired-color-label">${escapeHtml(row.color || 'Unlabelled')}${isRetiredHistory ? ' · historical' : ''}</span>`;
   return `
     <tr data-date="${row.date}" data-shift="${row.shift}" data-material="${escapeAttr(row.material)}" data-color="${escapeAttr(row.color)}" data-row-key="${escapeAttr(row.rowKey)}">
       <td></td>
@@ -953,7 +993,7 @@ function renderColorRow(row, locked) {
         ${colorLabel}
       </td>
       <td>
-        <input data-row-id="${escapeAttr(row.id)}" data-field="quantity" type="number" min="0" inputmode="numeric" value="${quantityValue(row.quantity)}" ${locked ? 'readonly' : ''}>
+        <input data-row-id="${escapeAttr(row.id)}" data-field="quantity" type="number" min="0" inputmode="numeric" value="${quantityValue(row.quantity)}" ${locked || isRetiredHistory ? 'readonly' : ''}>
       </td>
       <td></td>
       <td class="row-actions">${canDelete ? `<button class="mini-button no-print" data-delete="${escapeAttr(row.id)}" ${locked ? 'disabled' : ''}>Remove</button>` : ''}</td>
@@ -994,45 +1034,200 @@ function renderRecordsPage() {
 }
 
 function renderMonthlyPage() {
-  const month = state.selectedDate.slice(0, 7);
-  const rows = monthlyRows(month);
+  const month = state.selectedMonth;
+  const revenue = buildMonthlyRevenue({
+    records: state.records,
+    materialColors: state.materialColors,
+    unitPrices: state.unitPrices,
+    month,
+  });
   return `
-    <section>
-      <div class="register-toolbar">
+    <section class="billing-page">
+      <div class="register-toolbar billing-toolbar no-print">
+        <div>
+          <h2>MONTHLY REVENUE</h2>
+          <p class="subtle">Revenue from saved laundry records for the selected month.</p>
+        </div>
         <label>Month <input type="month" data-month-picker value="${month}"></label>
+        <button type="button" class="primary-button" data-action="open-invoice-form">Generate Monthly Invoice</button>
       </div>
-      <div class="table-wrap records-wrap">
-        <table class="records-table" aria-label="Monthly tracking">
-          <thead><tr><th>Material</th><th>Color</th><th>Monthly Quantity</th></tr></thead>
+      <div class="table-wrap billing-table-wrap">
+        <table class="records-table billing-table" aria-label="Monthly revenue">
+          <thead><tr><th>Item</th><th>Color</th><th>Monthly Quantity</th><th>Unit Price</th><th>Total Amount</th></tr></thead>
           <tbody>
-            ${rows.map((row) => `<tr><td>${escapeHtml(row.material)}</td><td>${escapeHtml(row.color)}</td><td>${row.total}</td></tr>`).join('')}
+            ${revenue.lines.map((line) => `
+              <tr>
+                <td>${escapeHtml(line.material)}</td>
+                <td>${escapeHtml(line.color)}</td>
+                <td>${line.quantity}</td>
+                <td>${line.unitPriceCents === null ? '—' : formatCents(line.unitPriceCents)}</td>
+                <td>${line.amountCents === null ? 'Set a unit price' : formatCents(line.amountCents)}</td>
+              </tr>`).join('')}
+            <tr class="grand-total-row"><th colspan="4">Grand Monthly Total</th><td>${formatCents(revenue.grandTotalCents)}</td></tr>
           </tbody>
         </table>
       </div>
+      ${!revenue.complete ? '<p class="billing-warning">Set a unit price for each active item/color with a recorded quantity to complete the monthly total.</p>' : ''}
+      <section class="saved-invoices no-print">
+        <h3>Generated Invoices</h3>
+        ${state.invoices.length ? `
+          <div class="table-wrap billing-table-wrap">
+            <table class="records-table">
+              <thead><tr><th>Invoice Number</th><th>Billing Period</th><th>Bill To</th><th>Total</th><th>Preview</th></tr></thead>
+              <tbody>${state.invoices.map((invoice) => `
+                <tr>
+                  <td>${escapeHtml(invoice.invoiceNumber)}</td>
+                  <td>${escapeHtml(invoice.month)}</td>
+                  <td>${escapeHtml(invoice.billTo?.recipientName || '')}</td>
+                  <td>${formatCents(invoice.grandTotalCents)}</td>
+                  <td><button type="button" class="mini-button" data-preview-invoice="${escapeAttr(invoice.invoiceNumber)}">Open Invoice</button></td>
+                </tr>`).join('')}</tbody>
+            </table>
+          </div>` : '<p class="subtle">No monthly invoices have been generated yet.</p>'}
+      </section>
     </section>
   `;
 }
 
-function monthlyRows(month) {
-  const grouped = new Map();
-  for (const record of state.records.map(normalizeRecord)) {
-    if (!record.date?.startsWith(month)) continue;
-    // Retired categories are excluded from Monthly Tracking entirely.
-    if (isRetiredMaterial(record.material)) continue;
-    const material = record.material || 'Unlabelled';
-    const color = record.color || '';
-    const key = `${material}::${color}`;
-    const row = grouped.get(key) || { material, color, total: 0 };
-    row.total += quantityNumber(record.quantity);
-    grouped.set(key, row);
-  }
-  for (const material of MATERIALS) {
-    for (const color of materialColorsFor(material.label)) {
-      const key = `${material.label}::${color.label}`;
-      if (!grouped.has(key)) grouped.set(key, { material: material.label, color: color.label, total: 0 });
-    }
-  }
-  return Array.from(grouped.values()).sort((a, b) => `${a.material}${a.color}`.localeCompare(`${b.material}${b.color}`));
+function renderUnitPricePage() {
+  return `
+    <section class="billing-page">
+      <div class="page-head">
+        <div>
+          <h2>Unit Price Settings</h2>
+          <p class="subtle">Set the current price for each active laundry item and color. Saved invoices keep their original price snapshot.</p>
+        </div>
+        <button type="button" class="primary-button" data-action="save-unit-prices">Save Unit Prices</button>
+      </div>
+      <div class="table-wrap billing-table-wrap">
+        <table class="records-table billing-table" aria-label="Unit price settings">
+          <thead><tr><th>Item</th><th>Color</th><th>Unit Price</th></tr></thead>
+          <tbody>${normalizeMaterialColors(state.materialColors).map((row) => {
+            const key = `${row.material}\u0000${row.label}`;
+            const current = state.unitPrices.find((price) => price.material === row.material && price.color === row.label)?.unitPrice ?? '';
+            const value = Object.hasOwn(state.priceDraft, key) ? state.priceDraft[key] : current;
+            return `<tr>
+              <td>${escapeHtml(row.material)}</td>
+              <td>${escapeHtml(row.label)}</td>
+              <td><label class="price-input-label"><span class="visually-hidden">Unit price for ${escapeHtml(row.material)} ${escapeHtml(row.label)}</span><input data-unit-price="${escapeAttr(JSON.stringify([row.material, row.label]))}" type="number" min="0" step="0.01" inputmode="decimal" value="${escapeAttr(value)}" aria-label="${escapeAttr(`${row.material} ${row.label} unit price`)}"></label></td>
+            </tr>`;
+          }).join('')}</tbody>
+        </table>
+      </div>
+      <p class="subtle billing-help">Prices are saved for future invoices. Previously generated invoices never change.</p>
+    </section>
+  `;
+}
+
+function renderInvoiceFormModal() {
+  const modal = state.invoiceFormModal;
+  if (!modal) return '';
+  const billTo = modal.billTo || {};
+  const value = (field) => escapeAttr(billTo[field] || '');
+  return `
+    <div class="modal-overlay invoice-form-overlay" data-invoice-modal-overlay>
+      <form class="modal-card invoice-form-card" data-invoice-form role="dialog" aria-modal="true" aria-labelledby="invoice-form-title">
+        <h3 id="invoice-form-title">Generate Monthly Invoice</h3>
+        <p class="subtle">Invoice period: <strong>${escapeHtml(modal.month)}</strong>. Bill-to information and current prices are saved with this invoice.</p>
+        <div class="invoice-form-grid">
+          <label class="modal-label">Recipient name <input data-bill-to-name name="recipientName" autocomplete="name" maxlength="200" required value="${value('recipientName')}"></label>
+          <label class="modal-label">Company name <input name="companyName" autocomplete="organization" maxlength="200" value="${value('companyName')}"></label>
+          <label class="modal-label invoice-form-wide">Street / address <input name="street" autocomplete="street-address" maxlength="200" value="${value('street')}"></label>
+          <label class="modal-label">City <input name="city" autocomplete="address-level2" maxlength="200" value="${value('city')}"></label>
+          <label class="modal-label">Phone <input name="phone" type="tel" autocomplete="tel" maxlength="200" value="${value('phone')}"></label>
+          <label class="modal-label invoice-form-wide">Email <input name="email" type="email" autocomplete="email" maxlength="200" value="${value('email')}"></label>
+          <label class="modal-label">Top safe area (mm) <input name="topSafeMm" type="number" min="10" max="100" step="1" required value="${escapeAttr(modal.topSafeMm ?? 45)}"></label>
+          <label class="modal-label">Bottom safe area (mm) <input name="bottomSafeMm" type="number" min="10" max="100" step="1" required value="${escapeAttr(modal.bottomSafeMm ?? 30)}"></label>
+        </div>
+        <p class="billing-help">Safe areas reserve the physical letterhead space on page one. Later pages use a compact header and footer.</p>
+        <p class="login-error invoice-form-error" data-invoice-error>${escapeHtml(modal.error || '')}</p>
+        <div class="modal-actions">
+          <button type="button" class="mini-button" data-action="cancel-invoice-form">Cancel</button>
+          <button type="submit" class="primary-button">Create Invoice Preview</button>
+        </div>
+      </form>
+    </div>
+  `;
+}
+
+function invoicePages(invoice) {
+  return paginateInvoiceLines(invoice);
+}
+
+function renderInvoicePreview() {
+  const invoice = state.invoicePreview;
+  if (!invoice) return '';
+  const pages = invoicePages(invoice);
+  const billTo = invoice.billTo || {};
+  const company = invoice.companyInfo || {};
+  return `
+    <section class="invoice-preview" aria-label="Invoice preview">
+      <div class="invoice-preview-toolbar no-print">
+        <div>
+          <h2>Invoice Preview</h2>
+          <p class="subtle">A4 pages • reserved first-page letterhead areas • ${pages.length} page${pages.length === 1 ? '' : 's'}</p>
+        </div>
+        <div class="invoice-preview-actions">
+          <button type="button" class="mini-button" data-action="close-invoice-preview">Close Preview</button>
+          <button type="button" class="primary-button" data-action="print-invoice">Print / Save as PDF</button>
+        </div>
+      </div>
+      <div class="invoice-document">
+        ${pages.map((pageLines, pageIndex) => {
+          const first = pageIndex === 0;
+          const last = pageIndex === pages.length - 1;
+          return `
+            <article class="invoice-page ${first ? 'invoice-page-first' : 'invoice-page-continuation'}"
+              style="${first ? `--top-safe:${invoice.topSafeMm}mm;--bottom-safe:${invoice.bottomSafeMm}mm` : ''}">
+              ${first ? `<div class="invoice-safe-zone invoice-safe-zone-top">
+                <strong>${escapeHtml(company.name || 'Physical letterhead area')}</strong>
+                <span>${escapeHtml([company.poBox, company.address, company.phone, company.email].filter(Boolean).join(' · ') || `${invoice.topSafeMm} mm reserved for existing letterhead`)}</span>
+              </div>` : ''}
+              <div class="invoice-page-content">
+                <header class="invoice-page-header">
+                  ${first ? `<div><p class="invoice-eyebrow">MONTHLY LAUNDRY STATEMENT</p><h1>INVOICE</h1></div>` : `<strong class="invoice-continuation-title">Monthly Laundry Invoice</strong>`}
+                  <div class="invoice-identifiers">
+                    <div><span>Invoice Number</span><strong>${escapeHtml(invoice.invoiceNumber)}</strong></div>
+                    <div><span>Customer ID</span><strong>${escapeHtml(invoice.invoiceNumber)}</strong></div>
+                    <div><span>Date</span><strong>${escapeHtml(formatDate(String(invoice.generatedAt).slice(0, 10)))}</strong></div>
+                    <div><span>Billing Period</span><strong>${escapeHtml(invoice.month)}</strong></div>
+                  </div>
+                </header>
+                ${first ? `
+                  <section class="invoice-bill-to">
+                    <h2>Bill To</h2>
+                    ${billTo.recipientName ? `<strong>${escapeHtml(billTo.recipientName)}</strong>` : ''}
+                    ${billTo.companyName ? `<span>${escapeHtml(billTo.companyName)}</span>` : ''}
+                    ${billTo.street ? `<span>${escapeHtml(billTo.street)}</span>` : ''}
+                    ${billTo.city ? `<span>${escapeHtml(billTo.city)}</span>` : ''}
+                    ${billTo.phone ? `<span>${escapeHtml(billTo.phone)}</span>` : ''}
+                    ${billTo.email ? `<span>${escapeHtml(billTo.email)}</span>` : ''}
+                  </section>` : ''}
+                <table class="invoice-table">
+                  <thead><tr><th>Item</th><th>Color</th><th>Quantity</th><th>Unit Price</th><th>Amount</th></tr></thead>
+                  <tbody>${pageLines.map((line) => `
+                    <tr>
+                      <td>${escapeHtml(line.item)}</td>
+                      <td>${escapeHtml(line.color)}</td>
+                      <td>${line.quantity}</td>
+                      <td>${formatCents(line.unitPriceCents)}</td>
+                      <td>${formatCents(line.amountCents)}</td>
+                    </tr>`).join('')}
+                    ${!pageLines.length ? '<tr><td colspan="5" class="invoice-empty">No active laundry items were recorded for this month.</td></tr>' : ''}
+                    ${last ? `<tr class="invoice-grand-total"><th colspan="4">Grand Monthly Total</th><td>${formatCents(invoice.grandTotalCents)}</td></tr>` : ''}
+                  </tbody>
+                </table>
+                <footer class="invoice-page-footer">
+                  <span>${escapeHtml(invoice.invoiceNumber)} · ${escapeHtml(invoice.month)}</span>
+                  <span>Page ${pageIndex + 1} of ${pages.length}</span>
+                </footer>
+              </div>
+              ${first ? `<div class="invoice-safe-zone invoice-safe-zone-bottom">Physical letterhead footer area · ${invoice.bottomSafeMm} mm reserved</div>` : ''}
+            </article>`;
+        }).join('')}
+      </div>
+    </section>
+  `;
 }
 
 async function createDailyForm(date) {
@@ -1158,6 +1353,59 @@ function bindShiftDrag(root) {
   });
 }
 
+async function saveUnitPrices(root) {
+  const unitPrices = Array.from(root.querySelectorAll('[data-unit-price]'))
+    .filter((input) => input.value.trim() !== '')
+    .map((input) => {
+      const [material, color] = JSON.parse(input.dataset.unitPrice);
+      return { material, color, unitPrice: input.value.trim() };
+    });
+  try {
+    const result = await api('api/unit-prices', {
+      method: 'PUT',
+      body: JSON.stringify({ unitPrices }),
+    });
+    state.unitPrices = result.unitPrices || [];
+    state.priceDraft = {};
+    state.notice = 'Unit prices saved.';
+    saveLocal();
+    render();
+  } catch (error) {
+    state.notice = `Unit prices were not saved: ${error.message}`;
+    renderStatusOnly();
+  }
+}
+
+async function createMonthlyInvoice(form) {
+  const data = new FormData(form);
+  const billTo = Object.fromEntries(['recipientName', 'companyName', 'street', 'city', 'phone', 'email']
+    .map((field) => [field, String(data.get(field) || '').trim()]));
+  const draft = {
+    month: state.invoiceFormModal.month,
+    billTo,
+    topSafeMm: Number(data.get('topSafeMm')),
+    bottomSafeMm: Number(data.get('bottomSafeMm')),
+    error: '',
+  };
+  state.invoiceFormModal = draft;
+  try {
+    const result = await api('api/invoices', {
+      method: 'POST',
+      body: JSON.stringify(draft),
+    });
+    state.invoicePreview = result.invoice;
+    state.invoices = [result.invoice, ...state.invoices.filter((invoice) =>
+      invoice.invoiceNumber !== result.invoice.invoiceNumber)];
+    state.invoiceFormModal = null;
+    state.notice = '';
+    saveLocal();
+    render();
+  } catch (error) {
+    state.invoiceFormModal = { ...draft, error: error.message };
+    render();
+  }
+}
+
 function bindEvents(root) {
   root.querySelectorAll('[data-tab]').forEach((button) => {
     button.addEventListener('click', () => {
@@ -1175,9 +1423,45 @@ function bindEvents(root) {
   });
   root.querySelectorAll('[data-month-picker]').forEach((input) => {
     input.addEventListener('change', () => {
-      state.selectedDate = `${input.value || todayIso().slice(0, 7)}-01`;
+      state.selectedMonth = input.value || todayIso().slice(0, 7);
       saveLocal();
       render();
+    });
+  });
+  root.querySelectorAll('[data-unit-price]').forEach((input) => {
+    input.addEventListener('input', () => {
+      const [material, color] = JSON.parse(input.dataset.unitPrice);
+      state.priceDraft[`${material}\u0000${color}`] = input.value;
+      saveLocal();
+    });
+  });
+  root.querySelector('[data-invoice-form]')?.addEventListener('submit', (event) => {
+    event.preventDefault();
+    if (event.currentTarget.reportValidity()) createMonthlyInvoice(event.currentTarget);
+  });
+  root.querySelector('[data-invoice-form]')?.addEventListener('input', () => {
+    const error = root.querySelector('[data-invoice-error]');
+    if (error) error.textContent = '';
+  });
+  root.querySelectorAll('[data-preview-invoice]').forEach((button) => {
+    button.addEventListener('click', () => {
+      state.invoicePreview = state.invoices.find((invoice) =>
+        invoice.invoiceNumber === button.dataset.previewInvoice) || null;
+      render();
+    });
+  });
+  root.querySelectorAll('[data-invoice-modal-overlay]').forEach((overlay) => {
+    overlay.addEventListener('click', (event) => {
+      if (event.target === overlay) {
+        state.invoiceFormModal = null;
+        render();
+      }
+    });
+    overlay.addEventListener('keydown', (event) => {
+      if (event.key === 'Escape') {
+        state.invoiceFormModal = null;
+        render();
+      }
     });
   });
   root.querySelectorAll('[data-row-id]').forEach((input) => {
@@ -1218,9 +1502,23 @@ function bindEvents(root) {
       requestAnimationFrame(() => window.print());
     });
   });
-    root.querySelectorAll('[data-action]').forEach((element) => {
+  root.querySelectorAll('[data-action]').forEach((element) => {
     element.addEventListener('click', async () => {
       const action = element.dataset.action;
+      if (action === 'save-unit-prices') await saveUnitPrices(root);
+      if (action === 'open-invoice-form') {
+        state.invoiceFormModal = { month: state.selectedMonth, billTo: {}, topSafeMm: 45, bottomSafeMm: 30, error: '' };
+        render();
+      }
+      if (action === 'cancel-invoice-form') {
+        state.invoiceFormModal = null;
+        render();
+      }
+      if (action === 'close-invoice-preview') {
+        state.invoicePreview = null;
+        render();
+      }
+      if (action === 'print-invoice') window.print();
       if (action === 'color-cancel') {
         state.colorModal = null;
         render();

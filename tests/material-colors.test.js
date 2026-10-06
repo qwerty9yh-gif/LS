@@ -1,13 +1,20 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { DEFAULT_MATERIAL_COLORS, applyMaterialColorMutation, normalizeMaterialColors } from '../material-colors.js';
+import { DEFAULT_MATERIAL_COLORS, applyMaterialColorMutation, isRetiredMaterialColor, normalizeMaterialColors } from '../material-colors.js';
 
 test('default color catalog matches the current register categories', () => {
-  assert.equal(DEFAULT_MATERIAL_COLORS.length, 21);
+  assert.equal(DEFAULT_MATERIAL_COLORS.length, 13);
   assert.deepEqual(
     DEFAULT_MATERIAL_COLORS.filter((row) => row.material === 'Shirts').map((row) => row.label),
     ['White', 'Blue', 'Brown', 'Grey'],
   );
+  assert.equal(DEFAULT_MATERIAL_COLORS.some((row) =>
+    ['Towels', 'Table Clothes', 'Bed Sheets'].includes(row.material)
+      && ['Blue', 'Cream', 'Green', 'Yellow'].includes(row.label)), false);
+  assert.equal(isRetiredMaterialColor('Bed Sheets', ' BLUE '), true);
+  assert.equal(isRetiredMaterialColor('Towels', 'yellow'), true);
+  assert.equal(isRetiredMaterialColor('Towels', 'White'), false);
+  assert.equal(isRetiredMaterialColor('Shirts', 'Blue'), false);
 });
 
 test('catalog normalization filters invalid rows and duplicate labels', () => {

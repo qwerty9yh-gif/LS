@@ -100,6 +100,39 @@ model MaterialColor {
   @@map("material_colors")
 }
 
+model UnitPrice {
+  material  String
+  color     String
+  unitPrice Decimal  @map("unit_price") @db.Decimal(12, 2)
+  updatedAt DateTime @default(now()) @map("updated_at") @db.Timestamptz(6)
+
+  @@id([material, color])
+  @@map("unit_prices")
+}
+
+model InvoiceSequence {
+  month      String   @id
+  lastNumber Int      @map("last_number")
+  updatedAt  DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@map("invoice_sequences")
+}
+
+model Invoice {
+  invoiceNumber String   @id @map("invoice_number")
+  month         String
+  generatedAt   DateTime @default(now()) @map("generated_at") @db.Timestamptz(6)
+  billTo        Json     @map("bill_to")
+  companyInfo   Json     @map("company_info")
+  lineItems     Json     @map("line_items")
+  grandTotal    String   @map("grand_total")
+  topSafeMm     Int      @map("top_safe_mm")
+  bottomSafeMm  Int      @map("bottom_safe_mm")
+
+  @@index([month, generatedAt(sort: Desc)], map: "idx_invoices_month_generated")
+  @@map("invoices")
+}
+
 model SyncEvent {
   id     Int      @id @default(autoincrement())
   at     DateTime @default(now()) @db.Timestamptz(6)

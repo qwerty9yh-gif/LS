@@ -121,6 +121,41 @@ CREATE TABLE IF NOT EXISTS material_colors (
 
 CREATE INDEX IF NOT EXISTS idx_material_colors_material_order ON material_colors (material, display_order);
 
+-- Retire only the requested active color entries. Laundry rows remain intact.
+DELETE FROM material_colors
+WHERE (lower(trim(material)) = 'bed sheets' AND lower(trim(label)) IN ('blue', 'cream', 'green'))
+   OR (lower(trim(material)) = 'table clothes' AND lower(trim(label)) IN ('blue', 'cream'))
+   OR (lower(trim(material)) = 'towels' AND lower(trim(label)) IN ('blue', 'green', 'yellow'));
+
+CREATE TABLE IF NOT EXISTS unit_prices (
+  material   TEXT          NOT NULL,
+  color      TEXT          NOT NULL,
+  unit_price DECIMAL(12,2) NOT NULL CHECK (unit_price >= 0),
+  updated_at TIMESTAMPTZ   NOT NULL DEFAULT NOW(),
+  CONSTRAINT unit_prices_pkey PRIMARY KEY (material, color)
+);
+
+CREATE TABLE IF NOT EXISTS invoice_sequences (
+  month       TEXT        PRIMARY KEY,
+  last_number INTEGER     NOT NULL CHECK (last_number >= 0),
+  updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS invoices (
+  invoice_number TEXT        PRIMARY KEY,
+  month          TEXT        NOT NULL,
+  generated_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  bill_to        JSONB       NOT NULL,
+  company_info   JSONB       NOT NULL,
+  line_items     JSONB       NOT NULL,
+  grand_total    TEXT        NOT NULL,
+  top_safe_mm    INTEGER     NOT NULL CHECK (top_safe_mm BETWEEN 10 AND 100),
+  bottom_safe_mm INTEGER     NOT NULL CHECK (bottom_safe_mm BETWEEN 10 AND 100)
+);
+
+CREATE INDEX IF NOT EXISTS idx_invoices_month_generated
+ON invoices (month, generated_at DESC);
+
 -- =========================================================================
 -- sync_events table
 -- Replaces the JSON "syncEvents" array. Append-only log of sync attempts.

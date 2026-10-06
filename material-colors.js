@@ -7,6 +7,24 @@ export const MATERIAL_LABELS = Object.freeze([
   'Bed Sheets',
 ]);
 
+export const RETIRED_MATERIAL_COLORS = Object.freeze([
+  { material: 'Bed Sheets', label: 'Blue' },
+  { material: 'Bed Sheets', label: 'Cream' },
+  { material: 'Bed Sheets', label: 'Green' },
+  { material: 'Table Clothes', label: 'Blue' },
+  { material: 'Table Clothes', label: 'Cream' },
+  { material: 'Towels', label: 'Blue' },
+  { material: 'Towels', label: 'Green' },
+  { material: 'Towels', label: 'Yellow' },
+]);
+
+const retiredMaterialColorKeys = new Set(RETIRED_MATERIAL_COLORS.map(({ material, label }) =>
+  `${material}\u0000${label.toLocaleLowerCase()}`));
+
+export function isRetiredMaterialColor(material, label) {
+  return retiredMaterialColorKeys.has(`${String(material || '').trim()}\u0000${String(label || '').trim().toLocaleLowerCase()}`);
+}
+
 export const DEFAULT_MATERIAL_COLORS = Object.freeze([
   { material: 'Shirts', label: 'White', displayOrder: 1 },
   { material: 'Shirts', label: 'Blue', displayOrder: 2 },
@@ -19,16 +37,8 @@ export const DEFAULT_MATERIAL_COLORS = Object.freeze([
   { material: 'Overcoats', label: 'Blue Black', displayOrder: 2 },
   { material: 'Overcoats', label: 'Cereals High Hygiene', displayOrder: 3 },
   { material: 'Towels', label: 'White', displayOrder: 1 },
-  { material: 'Towels', label: 'Blue', displayOrder: 2 },
-  { material: 'Towels', label: 'Green', displayOrder: 3 },
-  { material: 'Towels', label: 'Yellow', displayOrder: 4 },
   { material: 'Table Clothes', label: 'White', displayOrder: 1 },
-  { material: 'Table Clothes', label: 'Cream', displayOrder: 2 },
-  { material: 'Table Clothes', label: 'Blue', displayOrder: 3 },
   { material: 'Bed Sheets', label: 'White', displayOrder: 1 },
-  { material: 'Bed Sheets', label: 'Cream', displayOrder: 2 },
-  { material: 'Bed Sheets', label: 'Blue', displayOrder: 3 },
-  { material: 'Bed Sheets', label: 'Green', displayOrder: 4 },
 ]);
 
 export function normalizeMaterialColors(rows) {
@@ -40,7 +50,8 @@ export function normalizeMaterialColors(rows) {
     const material = String(row?.material || '');
     const label = String(row?.label || '').trim();
     const key = `${material}\u0000${label.toLocaleLowerCase()}`;
-    if (!materialOrder.has(material) || !label || label.length > 50 || seen.has(key)) continue;
+    if (!materialOrder.has(material) || !label || label.length > 50 || seen.has(key)
+      || isRetiredMaterialColor(material, label)) continue;
     seen.add(key);
     const displayOrder = Number(row.displayOrder ?? row.display_order);
     normalized.push({
