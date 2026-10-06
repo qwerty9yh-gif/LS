@@ -204,7 +204,7 @@ input:focus, select:focus { border-color: var(--accent); outline: 2px solid rgba
   padding: 15mm; background: white; color: #1d2926; box-shadow: 0 8px 26px rgba(20, 35, 31, 0.18);
   overflow: hidden;
 }
-.invoice-page-first, .invoice-page-continuation { padding: 0 15mm; }
+.invoice-page-first, .invoice-page-continuation { padding: 8mm 15mm 0; }
 .invoice-page-content { display: flex; flex: 1; min-height: 0; flex-direction: column; }
 .invoice-page-header { display: flex; justify-content: space-between; align-items: flex-start; gap: 20px; padding-bottom: 16px; border-bottom: 3px solid var(--brand-yellow); }
 .invoice-brand-title { display: flex; align-items: center; gap: 12px; }
