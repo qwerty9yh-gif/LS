@@ -697,7 +697,7 @@ function renderLogin(root) {
   root.innerHTML = `
     <div class="login-screen">
       <form class="login-card" id="login-form">
-        <div class="splash-mark">LT</div>
+        <img class="splash-mark" src="./brand-logo.png" alt="MK Business Company Ltd.">
         <h1>Laundry Tracking</h1>
         <p class="login-hint">Sign in to continue</p>
         <label class="login-label" for="login-email">Email</label>
@@ -747,7 +747,7 @@ function render() {
     <div class="app">
       <header class="topbar no-print">
         <div class="brand">
-          <div class="brand-mark">LT</div>
+          <img class="brand-mark" src="./brand-logo.png" alt="MK Business Company Ltd.">
           <div>
             <h1>Laundry Tracking</h1>
             <p class="subtle" data-sync-status>${syncStatusLabel()}${installModeText()}</p>
@@ -1185,7 +1185,7 @@ function renderInvoicePreview() {
               </div>` : ''}
               <div class="invoice-page-content">
                 <header class="invoice-page-header">
-                  ${first ? `<div><p class="invoice-eyebrow">MONTHLY LAUNDRY STATEMENT</p><h1>INVOICE</h1></div>` : `<strong class="invoice-continuation-title">Monthly Laundry Invoice</strong>`}
+                  ${first ? `<div class="invoice-brand-title"><img src="./brand-logo.png" alt="MK Business Company Ltd."><div><p class="invoice-eyebrow">MONTHLY LAUNDRY STATEMENT</p><h1>INVOICE</h1></div></div>` : `<strong class="invoice-continuation-title">Monthly Laundry Invoice</strong>`}
                   <div class="invoice-identifiers">
                     <div><span>Invoice Number</span><strong>${escapeHtml(invoice.invoiceNumber)}</strong></div>
                     <div><span>Customer ID</span><strong>${escapeHtml(invoice.invoiceNumber)}</strong></div>

@@ -1,4 +1,4 @@
-const CACHE_NAME = 'laundry-tracking-v11-monthly-invoices';
+const CACHE_NAME = 'laundry-tracking-v12-mk-branding';
 const APP_SHELL = [
   './',
   './config.js',
@@ -10,6 +10,7 @@ const APP_SHELL = [
   './material-colors.js',
   './billing.js',
   './manifest.webmanifest',
+  './brand-logo.png',
   './icons/icon-192.png',
   './icons/icon-512.png'
 ];
@@ -46,7 +47,7 @@ self.addEventListener('fetch', (event) => {
   }
 
   const url = new URL(request.url);
-  const isAppAsset = ['/', '/index.html', '/app.js', '/sync-queue.js', '/shift-order.js', '/material-colors.js', '/billing.js', '/styles.css', '/config.js', '/service-worker.js']
+  const isAppAsset = ['/', '/index.html', '/app.js', '/sync-queue.js', '/shift-order.js', '/material-colors.js', '/billing.js', '/styles.css', '/config.js', '/service-worker.js', '/brand-logo.png']
     .some((path) => url.pathname.endsWith(path));
 
   event.respondWith(
