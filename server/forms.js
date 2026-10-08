@@ -24,3 +24,13 @@ export function formExists(dailyForms, records, date) {
   if (Array.isArray(dailyForms) && dailyForms.some((form) => form && form.date === date)) return true;
   return Array.isArray(records) && records.some((record) => record && record.date === date);
 }
+
+export function isShiftLocked(locks, date, shift) {
+  if (!Array.isArray(locks)) return false;
+  return locks.some((lock) => {
+    const lockDate = lock?.date instanceof Date
+      ? lock.date.toISOString().slice(0, 10)
+      : String(lock?.date ?? '').slice(0, 10);
+    return lockDate === date && normalizeShift(lock.shift) === normalizeShift(shift);
+  });
+}

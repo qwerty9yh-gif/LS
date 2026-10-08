@@ -9,7 +9,7 @@ import { PrismaClient } from '@prisma/client';
 import { google } from 'googleapis';
 import { setTimeout as delay } from 'node:timers/promises';
 import { verifyPassword } from './auth.js';
-import { normalizeShift, formExists as formDateExists, isValidFormDate } from './forms.js';
+import { normalizeShift, formExists as formDateExists, isShiftLocked, isValidFormDate } from './forms.js';
 import { DEFAULT_SHIFT_ORDER, SHIFT_KEYS as ORDERABLE_SHIFT_KEYS, isCompleteShiftOrder, normalizeShiftOrder } from '../shift-order.js';
 import { DEFAULT_MATERIAL_COLORS, MATERIAL_LABELS, isRetiredMaterialColor, normalizeMaterialColors } from '../material-colors.js';
 import { buildMonthlyRevenue, formatCents, parsePriceCents } from '../billing.js';
@@ -1230,6 +1230,13 @@ app.put('/api/records', asyncHandler(async (req, res) => {
         acceptedRecords = [];
         for (const record of cleaned) {
           await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtext(${record.id})) IS NULL AS locked`;
+          const date = new Date(`${record.date}T00:00:00.000Z`);
+          const lock = await tx.lock.findUnique({ where: { date_shift: { date, shift: record.shift } } });
+          if (lock) {
+            const error = new Error(`The ${record.shift} shift on ${record.date} is closed.`);
+            error.status = 409;
+            throw error;
+          }
           const existing = await tx.record.findUnique({ where: { id: record.id } });
           if (isRetiredMaterialColor(record.material, record.color) && !existing) {
             throw new Error(`${record.material} - ${record.color} is no longer available for new records.`);
@@ -1239,7 +1246,6 @@ app.put('/api/records', asyncHandler(async (req, res) => {
             committed.push(prismaRecordToApi(existing));
             continue;
           }
-          const date = new Date(`${record.date}T00:00:00.000Z`);
           const quantity = record.quantity === '' || record.quantity === null || record.quantity === undefined
             ? null
             : Number(record.quantity);
@@ -1299,6 +1305,11 @@ app.put('/api/records', asyncHandler(async (req, res) => {
       const db = await readJsonDb();
       const byId = new Map(db.records.map((record) => [record.id, record]));
       for (const record of cleaned) {
+        if (isShiftLocked(db.locks, record.date, record.shift)) {
+          const error = new Error(`The ${record.shift} shift on ${record.date} is closed.`);
+          error.status = 409;
+          throw error;
+        }
         const existing = byId.get(record.id);
         if (isRetiredMaterialColor(record.material, record.color) && !existing) {
           throw new Error(`${record.material} - ${record.color} is no longer available for new records.`);
@@ -1385,20 +1396,35 @@ app.put('/api/records', asyncHandler(async (req, res) => {
       });
     }
   } catch (error) {
-    res.status(400).json({ ok: false, error: error.message });
+    res.status(error.status || 400).json({ ok: false, error: error.message });
   }
 }));
 
 app.delete('/api/records/:id', asyncHandler(async (req, res) => {
   if (hasDb()) {
     await ensureSchema();
-    // Surgical delete: remove exactly one row by id. No snapshot rewrite,
-    // so concurrent writers cannot resurrect it.
-    const result = await prisma.record.deleteMany({ where: { id: req.params.id } });
+    const result = await prisma.$transaction(async (tx) => {
+      const record = await tx.record.findUnique({ where: { id: req.params.id } });
+      if (!record) return { count: 0, locked: null };
+      const date = toDateOnly(record.date);
+      const lock = await tx.lock.findUnique({ where: { date_shift: { date: record.date, shift: record.shift } } });
+      if (lock) return { count: 0, locked: { date, shift: record.shift } };
+      const deleted = await tx.record.deleteMany({ where: { id: req.params.id } });
+      return { count: deleted.count, locked: null };
+    });
+    if (result.locked) {
+      res.status(409).json({ ok: false, error: `The ${result.locked.shift} shift on ${result.locked.date} is closed.` });
+      return;
+    }
     res.json({ ok: true, deleted: result.count });
     return;
   }
   const db = await readJsonDb();
+  const record = db.records.find((item) => item.id === req.params.id);
+  if (record && isShiftLocked(db.locks, record.date, record.shift)) {
+    res.status(409).json({ ok: false, error: `The ${record.shift} shift on ${record.date} is closed.` });
+    return;
+  }
   const before = db.records.length;
   db.records = db.records.filter((record) => record.id !== req.params.id);
   await writeJsonDb(db);
@@ -1429,6 +1455,29 @@ app.post('/api/locks', asyncHandler(async (req, res) => {
     db.locks.push({ key, date, shift, lockedAt: new Date().toISOString(), reason: 'Shift closed' });
     await writeJsonDb(db);
   }
+  res.json({ ok: true, locks: db.locks });
+}));
+
+app.delete('/api/locks', asyncHandler(async (req, res) => {
+  const date = cleanText(req.body?.date);
+  const shift = normalizeShift(req.body?.shift);
+  if (!isValidFormDate(date) || !shifts.has(shift)) {
+    res.status(400).json({ ok: false, error: 'Valid date and shift are required.' });
+    return;
+  }
+  if (hasDb()) {
+    await ensureSchema();
+    await prisma.lock.deleteMany({
+      where: { date: new Date(`${date}T00:00:00.000Z`), shift },
+    });
+    const db = await readDb();
+    res.json({ ok: true, locks: db.locks });
+    return;
+  }
+  const db = await readJsonDb();
+  const key = lockKey(date, shift);
+  db.locks = db.locks.filter((lock) => lock.key !== key && !(lock.date === date && lock.shift === shift));
+  await writeJsonDb(db);
   res.json({ ok: true, locks: db.locks });
 }));
 
