@@ -74,6 +74,14 @@ or **Print / Save as PDF** for A4 output. Configure fixed company information
 with the optional server environment variables above. The physical letterhead
 itself is not reproduced in the invoice.
 
+The separate **Export Daily Monthly Report (PDF)** button on the Monthly Revenue
+page opens a chronological report for the selected month and uses the browser's
+Print / Save as PDF workflow. It includes the actual records and available
+company branding, starts each recorded date on a new A4 page, repeats date and
+column headings when a day's table spans pages, and ends with a list of dates
+without records. Empty days do not get daily sections. The monthly revenue
+summary and invoice calculations are unchanged.
+
 ### Cross-device sync
 
 The browser keeps pending mutations in local storage and replays them in order

@@ -53,6 +53,7 @@ h2 { font-size: 22px; line-height: 1.2; letter-spacing: 0.01em; }
 .input-inline input, .input-inline label { display: inline-flex; }
 .form-toolbar { flex-wrap: wrap; }
 .form-toolbar-left, .form-toolbar-right { display: flex; align-items: flex-end; gap: 10px; flex-wrap: wrap; }
+.monthly-export-actions { display: flex; align-items: flex-end; gap: 8px; flex-wrap: wrap; }
 .new-form-button { font-weight: 900; }
 .day-picker-label { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 12px; font-weight: 800; text-transform: uppercase; }
 .modal-overlay {

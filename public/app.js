@@ -2,6 +2,7 @@ import { enqueueMutation, readMutationQueue, removeQueuedMutation } from './sync
 import { DEFAULT_SHIFT_ORDER, SHIFT_KEYS, isCompleteShiftOrder, moveShift, normalizeShiftOrder, placeShift } from './shift-order.js';
 import { DEFAULT_MATERIAL_COLORS, applyMaterialColorMutation, isRetiredMaterialColor, normalizeMaterialColors } from './material-colors.js';
 import { buildMonthlyRevenue, formatCents, paginateInvoiceLines } from './billing.js';
+import { buildMonthlyDailyReport, renderMonthlyDailyReportHtml } from './monthly-report.js';
 
 const SHIFTS = [
   { key: 'morning', label: 'Morning', time: 'Morning shift' },
@@ -1049,7 +1050,10 @@ function renderMonthlyPage() {
           <p class="subtle">Revenue from saved laundry records for the selected month.</p>
         </div>
         <label>Month <input type="month" data-month-picker value="${month}"></label>
-        <button type="button" class="primary-button" data-action="open-invoice-form">Generate Monthly Invoice</button>
+        <div class="monthly-export-actions">
+          <button type="button" class="primary-button" data-action="open-invoice-form">Generate Monthly Invoice</button>
+          <button type="button" class="primary-button" data-action="export-daily-monthly-report">Export Daily Monthly Report (PDF)</button>
+        </div>
       </div>
       <div class="table-wrap billing-table-wrap">
         <table class="records-table billing-table" aria-label="Monthly revenue">
@@ -1087,6 +1091,35 @@ function renderMonthlyPage() {
       </section>
     </section>
   `;
+}
+
+function exportDailyMonthlyReport() {
+  let reportWindow;
+  try {
+    const report = buildMonthlyDailyReport({
+      month: state.selectedMonth,
+      records: state.records,
+      shiftOrder: state.shiftOrder,
+    });
+    reportWindow = window.open('', '_blank');
+    if (!reportWindow) throw new Error('The report window was blocked. Allow pop-ups and try again.');
+
+    const html = renderMonthlyDailyReportHtml({
+      report,
+      companyName: state.companyInfo?.name || 'MK Business Company Ltd.',
+      companyInfo: state.companyInfo,
+      logoUrl: new URL('./brand-logo.png', window.location.href).href,
+    });
+    reportWindow.document.open();
+    reportWindow.document.write(html);
+    reportWindow.document.close();
+    reportWindow.setTimeout(() => reportWindow.print(), 500);
+    state.notice = '';
+  } catch (error) {
+    reportWindow?.close();
+    state.notice = `Daily monthly PDF report could not be opened: ${error.message}`;
+    renderStatusOnly();
+  }
 }
 
 function renderUnitPricePage() {
@@ -1507,6 +1540,7 @@ function bindEvents(root) {
         state.invoiceFormModal = { month: state.selectedMonth, billTo: {}, topSafeMm: 0, bottomSafeMm: 0, error: '' };
         render();
       }
+      if (action === 'export-daily-monthly-report') exportDailyMonthlyReport();
       if (action === 'cancel-invoice-form') {
         state.invoiceFormModal = null;
         render();
