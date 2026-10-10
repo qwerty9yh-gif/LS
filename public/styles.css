@@ -54,6 +54,7 @@ h2 { font-size: 22px; line-height: 1.2; letter-spacing: 0.01em; }
 .form-toolbar { flex-wrap: wrap; }
 .form-toolbar-left, .form-toolbar-right { display: flex; align-items: flex-end; gap: 10px; flex-wrap: wrap; }
 .monthly-export-actions { display: flex; align-items: flex-end; gap: 8px; flex-wrap: wrap; }
+#daily-print-document { display: none; }
 .new-form-button { font-weight: 900; }
 .day-picker-label { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 12px; font-weight: 800; text-transform: uppercase; }
 .modal-overlay {
@@ -243,6 +244,7 @@ input:focus, select:focus { border-color: var(--accent); outline: 2px solid rgba
 
 @media print {
   @page { size: A4 portrait; margin: 0; }
+  @page daily-register { size: A4 portrait; margin: 12mm; }
   html, body { width: 210mm; min-width: 0; margin: 0; padding: 0; background: white; }
   #app-shell, .app, .invoice-preview, .invoice-document { width: 210mm; min-width: 0; margin: 0; padding: 0; }
   .app > :not(.invoice-preview) { display: none !important; }
@@ -254,6 +256,30 @@ input:focus, select:focus { border-color: var(--accent); outline: 2px solid rgba
   .invoice-page:last-child { break-after: auto; page-break-after: auto; }
   .invoice-page-header, .invoice-bill-to, .invoice-table, .invoice-page-footer { break-inside: avoid; page-break-inside: avoid; }
   .invoice-brand-title img { print-color-adjust: exact; }
+  body.printing-daily-register { page: daily-register; width: auto; min-width: 0; background: white; }
+  body.printing-daily-register #app-shell { width: auto; min-width: 0; margin: 0; padding: 0; }
+  body.printing-daily-register #app-shell > .app { display: none !important; }
+  body.printing-daily-register #daily-print-document { display: block !important; width: auto; margin: 0; padding: 0; }
+  .daily-print-page { color: #17304d; font: 9pt "Avenir Next", "Segoe UI", Arial, sans-serif; }
+  .daily-print-brand { display: flex; align-items: center; gap: 10mm; margin-bottom: 7mm; padding-bottom: 5mm; border-bottom: 3px solid #f1dd26; }
+  .daily-print-brand img { width: 42mm; max-height: 22mm; object-fit: contain; }
+  .daily-print-brand h1 { margin-bottom: 3mm; color: #0c45b8; font-size: 17pt; }
+  .daily-print-brand h2 { font-size: 13pt; }
+  .daily-print-shift { margin: 0 0 5mm; }
+  .daily-print-shift h3 { margin: 0 0 2mm; color: #0c45b8; font-size: 10pt; break-after: avoid; page-break-after: avoid; }
+  .daily-print-table { width: 100%; border-collapse: collapse; table-layout: fixed; font-size: 8pt; }
+  .daily-print-table thead { display: table-header-group; }
+  .daily-print-table tr { break-inside: avoid; page-break-inside: avoid; }
+  .daily-print-table th, .daily-print-table td { padding: 4px 3px; border: 1px solid #71827b; text-align: left; vertical-align: top; overflow-wrap: anywhere; }
+  .daily-print-table th { background: #edf3ff !important; font-size: 7.5pt; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  .daily-print-table th:nth-child(1) { width: 17%; }
+  .daily-print-table th:nth-child(2) { width: 20%; }
+  .daily-print-table th:nth-child(3) { width: 9%; }
+  .daily-print-table th:nth-child(4) { width: 24%; }
+  .daily-print-table th:nth-child(5) { width: 15%; }
+  .daily-print-table th:nth-child(6) { width: 15%; }
+  .daily-print-total { margin-top: 5mm; font-weight: 700; }
+  .daily-print-empty { padding: 12mm 4mm; border: 1px solid #d9e1ed; font-size: 12pt; }
   .main, .print-area { width: 100%; margin: 0; padding: 0; border: 0; overflow: visible; }
   .register-title { margin-bottom: 5px; padding: 4px 6px; break-after: avoid; }
   .register-title h2 { font-size: 14px; }

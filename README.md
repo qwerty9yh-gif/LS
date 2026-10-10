@@ -69,18 +69,24 @@ Bill To details. Invoice pages use the full available page height and include
 the company branding. The invoice gets a database-generated number; Customer
 ID is the same number. Issued invoice
 items, quantities, prices, customer/company information, and totals are saved
-as a financial snapshot. Use **Open Invoice** to preview an existing snapshot
-or **Print / Save as PDF** for A4 output. Configure fixed company information
-with the optional server environment variables above. The physical letterhead
-itself is not reproduced in the invoice.
+as a financial snapshot. Use **Open Invoice** to preview an existing snapshot,
+**Download Invoice PDF** to save/share a PDF, or **Print / Save as PDF** to
+print the current invoice in the installed app. Configure fixed company
+information with the optional server environment variables above.
 
-The separate **Export Daily Monthly Report (PDF)** button on the Monthly Revenue
-page opens a chronological report for the selected month and uses the browser's
-Print / Save as PDF workflow. It includes the actual records and available
-company branding, starts each recorded date on a new A4 page, repeats date and
-column headings when a day's table spans pages, and ends with a list of dates
-without records. Empty days do not get daily sections. The monthly revenue
-summary and invoice calculations are unchanged.
+**Export PDF** downloads/shares the Monthly Revenue summary for the selected
+month. The separate **Export Daily Monthly Report (PDF)** button generates a
+chronological, branded A4 PDF from the selected month's records. Recorded days
+start on separate pages; date and table headings repeat on continuation pages;
+empty days are omitted and listed on a final page. The monthly revenue summary,
+invoice calculations, and invoice numbering are unchanged. PDF exports use the
+installed app's local PDF generator and the platform's file-share/download
+workflow; they do not open a print website or a new browser tab.
+
+**Daily Print** prints the currently selected register date. **Print This Day**
+in the Daily Records list prints only the date on that row. Both render a
+dedicated, data-backed print view in the current application before invoking
+the browser/PWA print service.
 
 ### Cross-device sync
 

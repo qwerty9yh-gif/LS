@@ -2,7 +2,14 @@ import { enqueueMutation, readMutationQueue, removeQueuedMutation } from './sync
 import { DEFAULT_SHIFT_ORDER, SHIFT_KEYS, isCompleteShiftOrder, moveShift, normalizeShiftOrder, placeShift } from './shift-order.js';
 import { DEFAULT_MATERIAL_COLORS, applyMaterialColorMutation, isRetiredMaterialColor, normalizeMaterialColors } from './material-colors.js';
 import { buildMonthlyRevenue, formatCents, paginateInvoiceLines } from './billing.js';
-import { buildMonthlyDailyReport, renderMonthlyDailyReportHtml } from './monthly-report.js';
+import { buildMonthlyDailyReport } from './monthly-report.js';
+import {
+  createDailyMonthlyReportPdf,
+  createInvoicePdf,
+  createMonthlyRevenuePdf,
+  createPdfFilename,
+  savePdfFile,
+} from './pdf-reports.js';
 
 const SHIFTS = [
   { key: 'morning', label: 'Morning', time: 'Morning shift' },
@@ -81,6 +88,8 @@ let realtimeStartPromise = null;
 let hydratePromise = null;
 let realtimeRenderTimer = null;
 let materialColorPollTimer = null;
+let pdfExportInProgress = false;
+let brandLogoDataPromise = null;
 
 function loadLocal() {
   try {
@@ -131,6 +140,7 @@ function saveLocal() {
     shiftOrder: state.shiftOrder,
     unitPrices: state.unitPrices,
     invoices: state.invoices,
+    companyInfo: state.companyInfo,
     selectedMonth: state.selectedMonth,
     notice: state.notice
   }));
@@ -772,6 +782,7 @@ function render() {
       ${renderInvoiceFormModal()}
       ${renderInvoicePreview()}
     </div>
+    <div id="daily-print-document" aria-hidden="true"></div>
   `;
   bindEvents(root);
   if (state.colorModal && state.colorModal.mode !== 'delete') root.querySelector('[data-color-label]')?.focus();
@@ -809,7 +820,7 @@ function renderDailyPage() {
         <div class="no-print" style="margin-bottom:10px;display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
           <span class="subtle">Viewing form for <strong>${formatDate(state.selectedDate)}</strong> · ${dates.length} saved form${dates.length === 1 ? '' : 's'} · editing one day never affects another.</span>
           <span style="flex:1"></span>
-          <button class="primary-button" data-action="print">Print This Day</button>
+          <button class="primary-button" data-action="daily-print">Daily Print</button>
         </div>
         <div class="shift-list" data-shift-list>
           ${orderedDailyShifts().map((shift) => renderShiftBlock(shift)).join('')}
@@ -1023,7 +1034,7 @@ function renderRecordsPage() {
                 <td>${dailyTotal(date)}</td>
                 <td>
                   <button class="mini-button" data-open-date="${date}">Open</button>
-                  <button class="mini-button" data-print-date="${date}">Print</button>
+                  <button class="mini-button" data-print-date="${date}">Print This Day</button>
                 </td>
               </tr>
             `).join('')}
@@ -1051,8 +1062,9 @@ function renderMonthlyPage() {
         </div>
         <label>Month <input type="month" data-month-picker value="${month}"></label>
         <div class="monthly-export-actions">
+          <button type="button" class="primary-button" data-pdf-export data-action="export-monthly-revenue">Export PDF</button>
           <button type="button" class="primary-button" data-action="open-invoice-form">Generate Monthly Invoice</button>
-          <button type="button" class="primary-button" data-action="export-daily-monthly-report">Export Daily Monthly Report (PDF)</button>
+          <button type="button" class="primary-button" data-pdf-export data-action="export-daily-monthly-report">Export Daily Monthly Report (PDF)</button>
         </div>
       </div>
       <div class="table-wrap billing-table-wrap">
@@ -1093,35 +1105,6 @@ function renderMonthlyPage() {
   `;
 }
 
-function exportDailyMonthlyReport() {
-  let reportWindow;
-  try {
-    const report = buildMonthlyDailyReport({
-      month: state.selectedMonth,
-      records: state.records,
-      shiftOrder: state.shiftOrder,
-    });
-    reportWindow = window.open('', '_blank');
-    if (!reportWindow) throw new Error('The report window was blocked. Allow pop-ups and try again.');
-
-    const html = renderMonthlyDailyReportHtml({
-      report,
-      companyName: state.companyInfo?.name || 'MK Business Company Ltd.',
-      companyInfo: state.companyInfo,
-      logoUrl: new URL('./brand-logo.png', window.location.href).href,
-    });
-    reportWindow.document.open();
-    reportWindow.document.write(html);
-    reportWindow.document.close();
-    reportWindow.setTimeout(() => reportWindow.print(), 500);
-    state.notice = '';
-  } catch (error) {
-    reportWindow?.close();
-    state.notice = `Daily monthly PDF report could not be opened: ${error.message}`;
-    renderStatusOnly();
-  }
-}
-
 function renderUnitPricePage() {
   return `
     <section class="billing-page">
@@ -1150,6 +1133,193 @@ function renderUnitPricePage() {
       <p class="subtle billing-help">Prices are saved for future invoices. Previously generated invoices never change.</p>
     </section>
   `;
+}
+
+async function getBrandLogoData() {
+  if (!brandLogoDataPromise) {
+    brandLogoDataPromise = (async () => {
+      const response = await fetch('./brand-logo.png');
+      if (!response.ok) throw new Error('The laundry logo could not be loaded for the document.');
+      const bytes = new Uint8Array(await response.arrayBuffer());
+      let binary = '';
+      const chunkSize = 0x8000;
+      for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+        binary += String.fromCharCode(...bytes.subarray(offset, offset + chunkSize));
+      }
+      return `data:image/png;base64,${btoa(binary)}`;
+    })();
+  }
+  return brandLogoDataPromise;
+}
+
+function pdfLibrary() {
+  const Constructor = window.jspdf?.jsPDF;
+  if (!Constructor) throw new Error('The PDF generator is not ready. Reload the app and try again.');
+  return Constructor;
+}
+
+async function freshExportRecords() {
+  await persistDraft();
+  if (navigator.onLine) {
+    const result = await api('api/records');
+    if (!Array.isArray(result.records)) throw new Error('The server did not return a valid records list.');
+    mergeServerState(result);
+    saveLocal();
+  }
+  if (!Array.isArray(state.records)) throw new Error('Laundry records are unavailable.');
+  return state.records;
+}
+
+async function runPdfExport(label, filename, createDocument, { refreshRecords = false } = {}) {
+  if (pdfExportInProgress) {
+    state.notice = 'A PDF is already being prepared. Please wait for it to finish.';
+    renderStatusOnly();
+    return;
+  }
+  pdfExportInProgress = true;
+  document.querySelectorAll('[data-pdf-export]').forEach((button) => { button.disabled = true; });
+  state.notice = `Preparing ${label}…`;
+  renderStatusOnly();
+  try {
+    const records = refreshRecords ? await freshExportRecords() : null;
+    const logoData = await getBrandLogoData();
+    const doc = createDocument({
+      jsPDF: pdfLibrary(),
+      records,
+      logoData,
+      companyName: state.companyInfo?.name || 'MK Business Company Ltd.',
+      companyInfo: state.companyInfo || {},
+    });
+    const result = await savePdfFile(doc, filename);
+    state.notice = result === 'cancelled'
+      ? `${label} sharing was cancelled.`
+      : `${label} ${result === 'shared' ? 'is ready to save or share.' : 'download started.'}`;
+  } catch (error) {
+    state.notice = `${label} could not be generated: ${error.message}`;
+  } finally {
+    pdfExportInProgress = false;
+    document.querySelectorAll('[data-pdf-export]').forEach((button) => { button.disabled = false; });
+    renderStatusOnly();
+  }
+}
+
+function exportMonthlyRevenue() {
+  const month = state.selectedMonth;
+  const filename = createPdfFilename(null, month);
+  return runPdfExport('Monthly Revenue PDF', filename, ({ jsPDF, records, logoData, companyName, companyInfo }) => {
+    const revenue = buildMonthlyRevenue({
+      records,
+      materialColors: state.materialColors,
+      unitPrices: state.unitPrices,
+      month,
+    });
+    return createMonthlyRevenuePdf({
+      jsPDF, revenue, month, logoData, companyName, companyInfo,
+    });
+  }, { refreshRecords: true });
+}
+
+function exportDailyMonthlyReport() {
+  const month = state.selectedMonth;
+  const filename = createPdfFilename({ month });
+  return runPdfExport('Daily Monthly Report PDF', filename, ({ jsPDF, records, logoData, companyName, companyInfo }) => {
+    const report = buildMonthlyDailyReport({
+      month,
+      records,
+      shiftOrder: state.shiftOrder,
+    });
+    return createDailyMonthlyReportPdf({
+      jsPDF, report, logoData, companyName, companyInfo,
+    });
+  }, { refreshRecords: true });
+}
+
+function downloadInvoicePdf() {
+  const invoice = state.invoicePreview;
+  if (!invoice) {
+    state.notice = 'Open an invoice before downloading its PDF.';
+    renderStatusOnly();
+    return;
+  }
+  const filename = `Laundry_Invoice_${String(invoice.invoiceNumber).replace(/[^a-zA-Z0-9_-]/g, '_')}.pdf`;
+  return runPdfExport('Invoice PDF', filename, ({ jsPDF, logoData, companyInfo }) =>
+    createInvoicePdf({ jsPDF, invoice, logoData, companyInfo: invoice.companyInfo || companyInfo }));
+}
+
+function dailyPrintMarkup(date) {
+  const records = state.records
+    .filter((record) => String(record.date || '').slice(0, 10) === date)
+    .map(normalizeRecord);
+  const brandName = state.companyInfo?.name || 'MK Business Company Ltd.';
+  if (!records.length) {
+    return `<article class="daily-print-page">
+      <header class="daily-print-brand"><img src="./brand-logo.png" alt="${escapeAttr(brandName)}"><div><h1>${escapeHtml(brandName)}</h1><h2>Daily Register — ${escapeHtml(formatDate(date))}</h2></div></header>
+      <p class="daily-print-empty">No records are available for ${escapeHtml(formatDate(date))}.</p>
+    </article>`;
+  }
+  const rowsByShift = new Map(orderedDailyShifts().map((shift) => [shift.key,
+    records.filter((record) => record.shift === shift.key)]));
+  const sections = orderedDailyShifts().filter((shift) => rowsByShift.get(shift.key).length).map((shift) => `
+    <section class="daily-print-shift">
+      <h3>${escapeHtml(shift.label)} Shift</h3>
+      <table class="daily-print-table">
+        <thead><tr><th>Date / Shift</th><th>Material</th><th>Quantity</th><th>Name &amp; Signature — Laundry Personnel</th><th>Verified By</th><th>Status</th></tr></thead>
+        <tbody>${rowsByShift.get(shift.key).map((record) => `
+          <tr>
+            <td>${escapeHtml(formatDate(date))}<br>${escapeHtml(shift.label)}</td>
+            <td>${escapeHtml(record.material)}${record.color ? `<br>${escapeHtml(record.color)}` : ''}</td>
+            <td>${escapeHtml(quantityValue(record.quantity) || '—')}</td>
+            <td>Name: ${escapeHtml(record.laundryPersonnel || '—')}<br>Signature: ${escapeHtml(record.signature || '—')}</td>
+            <td>${escapeHtml(record.verifiedBy || '—')}</td>
+            <td>${escapeHtml(STATUS_LABELS[record.status] || record.status || '—')}</td>
+          </tr>`).join('')}</tbody>
+      </table>
+    </section>`).join('');
+  return `<article class="daily-print-page">
+    <header class="daily-print-brand"><img src="./brand-logo.png" alt="${escapeAttr(brandName)}"><div><h1>${escapeHtml(brandName)}</h1><h2>Daily Register — ${escapeHtml(formatDate(date))}</h2></div></header>
+    ${sections}
+    <p class="daily-print-total">Overall Daily Total — ${escapeHtml(formatDate(date))}: <strong>${dailyTotal(date)}</strong></p>
+  </article>`;
+}
+
+async function printDailyRecords(date) {
+  if (!isValidFormDate(date)) throw new Error('A valid date is required to print the daily register.');
+  await persistDraft();
+  if (navigator.onLine) {
+    const result = await api('api/records');
+    if (!Array.isArray(result.records)) throw new Error('The server did not return a valid records list.');
+    mergeServerState(result);
+    saveLocal();
+  }
+  const printRoot = document.getElementById('daily-print-document');
+  if (!printRoot) throw new Error('The daily print document could not be rendered.');
+  printRoot.innerHTML = dailyPrintMarkup(date);
+  document.body.classList.add('printing-daily-register');
+
+  try {
+    await document.fonts?.ready;
+    await Promise.all(Array.from(printRoot.querySelectorAll('img'), (image) => image.decode()));
+    await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    const restore = () => {
+      document.body.classList.remove('printing-daily-register');
+      printRoot.replaceChildren();
+    };
+    window.addEventListener('afterprint', restore, { once: true });
+    window.print();
+  } catch (error) {
+    document.body.classList.remove('printing-daily-register');
+    printRoot.replaceChildren();
+    throw error;
+  }
+}
+
+async function printInvoice() {
+  if (!state.invoicePreview) throw new Error('Open an invoice before printing it.');
+  await document.fonts?.ready;
+  const logo = document.querySelector('.invoice-preview .invoice-brand-title img');
+  if (logo) await logo.decode();
+  await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+  window.print();
 }
 
 function renderInvoiceFormModal() {
@@ -1207,6 +1377,7 @@ function renderInvoicePreview() {
         </div>
         <div class="invoice-preview-actions">
           <button type="button" class="mini-button" data-action="close-invoice-preview">Close Preview</button>
+          <button type="button" class="primary-button" data-pdf-export data-action="download-invoice-pdf">Download Invoice PDF</button>
           <button type="button" class="primary-button" data-action="print-invoice">Print / Save as PDF</button>
         </div>
       </div>
@@ -1524,23 +1695,34 @@ function bindEvents(root) {
     });
   });
   root.querySelectorAll('[data-print-date]').forEach((button) => {
-    button.addEventListener('click', () => {
-      state.selectedDate = button.dataset.printDate;
-      state.tab = 'daily';
-      saveLocal();
-      render();
-      requestAnimationFrame(() => window.print());
+    button.addEventListener('click', async () => {
+      try {
+        await printDailyRecords(button.dataset.printDate);
+      } catch (error) {
+        state.notice = `Daily print could not be prepared: ${error.message}`;
+        renderStatusOnly();
+      }
     });
   });
   root.querySelectorAll('[data-action]').forEach((element) => {
     element.addEventListener('click', async () => {
       const action = element.dataset.action;
       if (action === 'save-unit-prices') await saveUnitPrices(root);
+      if (action === 'export-monthly-revenue') await exportMonthlyRevenue();
+      if (action === 'export-daily-monthly-report') await exportDailyMonthlyReport();
+      if (action === 'download-invoice-pdf') await downloadInvoicePdf();
+      if (action === 'daily-print') {
+        try {
+          await printDailyRecords(state.selectedDate);
+        } catch (error) {
+          state.notice = `Daily print could not be prepared: ${error.message}`;
+          renderStatusOnly();
+        }
+      }
       if (action === 'open-invoice-form') {
         state.invoiceFormModal = { month: state.selectedMonth, billTo: {}, topSafeMm: 0, bottomSafeMm: 0, error: '' };
         render();
       }
-      if (action === 'export-daily-monthly-report') exportDailyMonthlyReport();
       if (action === 'cancel-invoice-form') {
         state.invoiceFormModal = null;
         render();
@@ -1549,7 +1731,14 @@ function bindEvents(root) {
         state.invoicePreview = null;
         render();
       }
-      if (action === 'print-invoice') window.print();
+      if (action === 'print-invoice') {
+        try {
+          await printInvoice();
+        } catch (error) {
+          state.notice = `Invoice print could not be prepared: ${error.message}`;
+          renderStatusOnly();
+        }
+      }
       if (action === 'color-cancel') {
         state.colorModal = null;
         render();
@@ -1559,7 +1748,14 @@ function bindEvents(root) {
       if (action === 'shift-move-up' || action === 'shift-move-down') {
         await persistShiftOrder(moveShift(state.shiftOrder, element.dataset.shift, action === 'shift-move-up' ? -1 : 1));
       }
-      if (action === 'print') window.print();
+      if (action === 'print') {
+        try {
+          await printDailyRecords(state.selectedDate);
+        } catch (error) {
+          state.notice = `Daily print could not be prepared: ${error.message}`;
+          renderStatusOnly();
+        }
+      }
       if (action === 'new-today') {
         state.selectedDate = todayIso();
         state.tab = 'daily';
