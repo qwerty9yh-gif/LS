@@ -1,7 +1,7 @@
 {
   "name": "Laundry Tracking",
   "short_name": "Laundry",
-  "description": "Shift-based laundry tracking with offline support and Google Sheets synchronization.",
+  "description": "Shift-based laundry tracking with offline support.",
   "start_url": ".",
   "scope": ".",
   "display": "standalone",

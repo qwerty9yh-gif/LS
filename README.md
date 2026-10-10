@@ -134,12 +134,6 @@ The application uses one shared login account. Passwords are stored as scrypt
 hashes in `users`; seeding does not replace an existing account or delete other
 users. A successful sign-in is remembered on the device in `laundry-auth-v1`.
 
-## Google Sheets
-
-Google Sheets is an optional export target. Credentials stay on the server.
-Configure `GOOGLE_SHEETS_SPREADSHEET_ID`, `GOOGLE_SERVICE_ACCOUNT_EMAIL`,
-`GOOGLE_PRIVATE_KEY`, and optionally `GOOGLE_SHEETS_TAB`.
-
 ## Run
 
 ```powershell

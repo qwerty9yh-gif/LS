@@ -6,7 +6,6 @@ import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import pg from 'pg';
 import { PrismaClient } from '@prisma/client';
-import { google } from 'googleapis';
 import { setTimeout as delay } from 'node:timers/promises';
 import { verifyPassword } from './auth.js';
 import { normalizeShift, formExists as formDateExists, isShiftLocked, isValidFormDate } from './forms.js';
@@ -499,249 +498,6 @@ function lockKey(date, shift) {
   return `${date}:${shift}`;
 }
 
-function isGoogleConfigured() {
-  return Boolean(
-    process.env.GOOGLE_SHEETS_SPREADSHEET_ID &&
-    (
-      process.env.GOOGLE_SERVICE_ACCOUNT_KEY_FILE ||
-      (process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL && process.env.GOOGLE_PRIVATE_KEY)
-    )
-  );
-}
-
-async function getSheetsClient() {
-  let credentials = {
-    client_email: process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL,
-    private_key: process.env.GOOGLE_PRIVATE_KEY?.replace(/\\n/g, '\n')
-  };
-
-  if (process.env.GOOGLE_SERVICE_ACCOUNT_KEY_FILE) {
-    const keyPath = path.resolve(rootDir, process.env.GOOGLE_SERVICE_ACCOUNT_KEY_FILE);
-    credentials = JSON.parse(await readFile(keyPath, 'utf8'));
-  }
-
-  const auth = new google.auth.JWT({
-    email: credentials.client_email,
-    key: credentials.private_key,
-    scopes: ['https://www.googleapis.com/auth/spreadsheets']
-  });
-  await auth.authorize();
-  return google.sheets({ version: 'v4', auth });
-}
-
-async function ensureSheetHeader(sheets) {
-  const spreadsheetId = process.env.GOOGLE_SHEETS_SPREADSHEET_ID;
-  const tab = process.env.GOOGLE_SHEETS_TAB || 'Records';
-  const header = ['ID', 'DATE', 'SHIFT', 'MATERIAL', 'COLOR', 'QUANTITY', 'LAUNDRY PERSONNEL', 'VERIFIED BY', 'SIGNATURE', 'STATUS', 'CREATED TIME', 'UPDATED TIME'];
-
-  try {
-    await sheets.spreadsheets.values.get({ spreadsheetId, range: `${tab}!A1:L1` });
-  } catch (error) {
-    if (error.code === 400) {
-      await sheets.spreadsheets.batchUpdate({
-        spreadsheetId,
-        requestBody: { requests: [{ addSheet: { properties: { title: tab } } }] }
-      });
-    } else {
-      throw error;
-    }
-  }
-
-  const existing = await sheets.spreadsheets.values.get({ spreadsheetId, range: `${tab}!A1:L1` });
-  if (!existing.data.values?.[0]?.length) {
-    await sheets.spreadsheets.values.update({
-      spreadsheetId,
-      range: `${tab}!A1:L1`,
-      valueInputOption: 'RAW',
-      requestBody: { values: [header] }
-    });
-  }
-}
-
-function recordToSheetRow(record) {
-  return [
-    record.id,
-    record.date,
-    record.shift.toUpperCase(),
-    record.material,
-    record.color || '',
-    record.quantity ?? '',
-    record.laundryPersonnel,
-    record.verifiedBy,
-    record.signature || '',
-    record.status.toUpperCase(),
-    record.createdAt,
-    record.updatedAt
-  ];
-}
-
-function sheetRowToRecord(row) {
-  const id = cleanText(row[0]);
-  if (!id) return null;
-
-  const date = cleanText(row[1]);
-  const shift = normalizeShift(row[2]);
-  const status = cleanText(row[9] || row[7] || 'received').toLowerCase();
-
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || !shifts.has(shift) || !statuses.has(status)) {
-    return null;
-  }
-
-  return {
-    id,
-    date,
-    shift,
-    material: cleanText(row[3]),
-    color: cleanText(row[4]),
-    quantity: row[5] === '' || row[5] === undefined ? null : Number(row[5] || 0),
-    laundryPersonnel: cleanText(row[6]),
-    verifiedBy: cleanText(row[7]),
-    signature: cleanText(row[8]),
-    status,
-    syncStatus: 'synced',
-    syncError: '',
-    createdAt: row[8] || new Date().toISOString(),
-    updatedAt: row[9] || new Date().toISOString(),
-    syncedAt: new Date().toISOString()
-  };
-}
-
-async function syncRecordsToGoogle(records) {
-  if (!records.length) return { synced: 0, skipped: 0 };
-  if (!isGoogleConfigured()) {
-    throw new Error('Google Sheets is not configured on the server.');
-  }
-
-  const spreadsheetId = process.env.GOOGLE_SHEETS_SPREADSHEET_ID;
-  const tab = process.env.GOOGLE_SHEETS_TAB || 'Records';
-  const sheets = await getSheetsClient();
-  await ensureSheetHeader(sheets);
-
-  const existing = await sheets.spreadsheets.values.get({ spreadsheetId, range: `${tab}!A2:L` });
-  const rows = existing.data.values || [];
-  const rowById = new Map(rows.map((row, index) => [row[0], index + 2]));
-
-  for (const record of records) {
-    const values = [recordToSheetRow(record)];
-    const rowNumber = rowById.get(record.id);
-    if (rowNumber) {
-      await sheets.spreadsheets.values.update({
-        spreadsheetId,
-        range: `${tab}!A${rowNumber}:L${rowNumber}`,
-        valueInputOption: 'RAW',
-        requestBody: { values }
-      });
-    } else {
-      await sheets.spreadsheets.values.append({
-        spreadsheetId,
-        range: `${tab}!A:L`,
-        valueInputOption: 'RAW',
-        insertDataOption: 'INSERT_ROWS',
-        requestBody: { values }
-      });
-    }
-  }
-
-  return { synced: records.length, skipped: 0 };
-}
-
-async function pullRecordsFromGoogle() {
-  if (!isGoogleConfigured()) {
-    throw new Error('Google Sheets is not configured on the server.');
-  }
-
-  const spreadsheetId = process.env.GOOGLE_SHEETS_SPREADSHEET_ID;
-  const tab = process.env.GOOGLE_SHEETS_TAB || 'Records';
-  const sheets = await getSheetsClient();
-  await ensureSheetHeader(sheets);
-
-  const existing = await sheets.spreadsheets.values.get({ spreadsheetId, range: `${tab}!A2:L` });
-  return (existing.data.values || []).map(sheetRowToRecord).filter(Boolean);
-}
-
-async function pruneSyncEvents(tx, keep = 200) {
-  // Sync events are an append-only audit log (never delete production rows).
-  // Only trim the oldest overflow if the table grows unbounded, keeping the
-  // newest `keep` rows. Returns number pruned (0 in normal operation).
-  const overflow = await tx.syncEvent.findMany({
-    orderBy: { at: 'desc' },
-    skip: keep,
-    select: { id: true },
-  });
-  if (!overflow.length) return 0;
-  const pruned = await tx.syncEvent.deleteMany({ where: { id: { in: overflow.map((row) => row.id) } } });
-  return pruned.count;
-}
-
-function mergeRecords(localRecords, remoteRecords) {
-  const byId = new Map(localRecords.map((record) => [record.id, record]));
-
-  for (const remote of remoteRecords) {
-    const local = byId.get(remote.id);
-    if (!local || new Date(remote.updatedAt || 0) >= new Date(local.updatedAt || 0)) {
-      byId.set(remote.id, remote);
-    }
-  }
-
-  return sortRecords(Array.from(byId.values()));
-}
-
-async function mergeGoogleRecordsIntoPostgres(localRecords, remoteRecords, syncedAt, event) {
-  const merged = mergeRecords(localRecords, remoteRecords);
-  const localById = new Map(localRecords.map((record) => [record.id, record]));
-  const mergedById = new Map(merged.map((record) => [record.id, record]));
-  const imported = remoteRecords.filter((remote) => {
-    const local = localById.get(remote.id);
-    return !local || new Date(remote.updatedAt || 0) >= new Date(local.updatedAt || 0);
-  });
-
-  await prisma.$transaction(async (tx) => {
-    if (syncedAt) {
-      await tx.record.updateMany({
-        where: { id: { in: localRecords.filter((record) => record.syncStatus !== 'synced').map((record) => record.id) } },
-        data: { syncStatus: 'synced', syncError: '', syncedAt: new Date(syncedAt) },
-      });
-    }
-    for (const remote of imported) {
-      const record = cleanRecord(mergedById.get(remote.id) || remote);
-      const date = new Date(`${record.date}T00:00:00.000Z`);
-      const updatedAt = new Date(record.updatedAt || syncedAt || Date.now());
-      const fields = {
-        date,
-        shift: record.shift,
-        material: record.material || '',
-        color: record.color || '',
-        rowKey: record.rowKey || '',
-        quantity: record.quantity === '' || record.quantity === null || record.quantity === undefined
-          ? null
-          : Number(record.quantity),
-        laundryPersonnel: record.laundryPersonnel || '',
-        verifiedBy: record.verifiedBy || '',
-        signature: record.signature || '',
-        status: record.status || 'received',
-        syncStatus: 'synced',
-        syncError: '',
-        updatedAt,
-        syncedAt: new Date(syncedAt || Date.now()),
-      };
-      await tx.record.upsert({
-        where: { id: record.id },
-        create: { id: record.id, ...fields, createdAt: new Date(record.createdAt || updatedAt) },
-        update: fields,
-      });
-    }
-    await tx.syncEvent.create({
-      data: {
-        at: new Date(event.at || syncedAt || Date.now()),
-        status: event.status,
-        error: event.error || null,
-        detail: event.detail || undefined,
-      },
-    });
-  });
-  return readDb();
-}
-
 // ─── Authentication: single universal account ────────────────────────────────
 // The whole application shares ONE seeded login account (server/seed-user.js).
 // No registration, no profiles, no password reset, no device/IP tracking.
@@ -1221,13 +977,11 @@ app.put('/api/records', asyncHandler(async (req, res) => {
     // table from a snapshot — a snapshot would overwrite other writers'
     // updatedAt values and could resurrect just-deleted rows.
     let savedRecords = [];
-    let acceptedRecords = [];
     if (hasDb()) {
       await ensureSchema();
       const now = new Date().toISOString();
       savedRecords = await prisma.$transaction(async (tx) => {
         const committed = [];
-        acceptedRecords = [];
         for (const record of cleaned) {
           await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtext(${record.id})) IS NULL AS locked`;
           const date = new Date(`${record.date}T00:00:00.000Z`);
@@ -1267,11 +1021,11 @@ app.put('/api/records', asyncHandler(async (req, res) => {
               verifiedBy: record.verifiedBy || '',
               signature: record.signature || '',
               status: record.status || 'received',
-              syncStatus: 'pending',
+              syncStatus: 'synced',
               syncError: '',
               createdAt: new Date(record.createdAt || now),
               updatedAt: incomingUpdatedAt,
-              syncedAt: null,
+              syncedAt: new Date(now),
             },
             update: {
               date,
@@ -1285,9 +1039,9 @@ app.put('/api/records', asyncHandler(async (req, res) => {
               signature: record.signature || '',
               status: record.status || 'received',
               updatedAt: incomingUpdatedAt,
-              syncStatus: 'pending',
+              syncStatus: 'synced',
               syncError: '',
-              syncedAt: null,
+              syncedAt: new Date(now),
             },
           });
           await tx.dailyForm.upsert({
@@ -1297,7 +1051,6 @@ app.put('/api/records', asyncHandler(async (req, res) => {
           });
           const refreshed = await tx.record.findUnique({ where: { id: record.id } });
           committed.push(prismaRecordToApi(refreshed || saved));
-          acceptedRecords.push(record);
         }
         return committed;
       });
@@ -1318,8 +1071,9 @@ app.put('/api/records', asyncHandler(async (req, res) => {
           ...existing,
           ...record,
           createdAt: existing?.createdAt || record.createdAt,
-          syncStatus: 'pending',
-          syncError: ''
+          syncStatus: 'synced',
+          syncError: '',
+          syncedAt: new Date().toISOString()
         });
         if (!formDateExists(db.dailyForms, [], record.date)) {
           db.dailyForms = [...(db.dailyForms || []), { date: record.date, createdAt: record.createdAt || new Date().toISOString() }];
@@ -1328,73 +1082,8 @@ app.put('/api/records', asyncHandler(async (req, res) => {
       db.records = sortRecords(Array.from(byId.values()));
       await writeJsonDb(db);
     }
-    const db = hasDb() ? null : await readJsonDb();
-
-    // Respond immediately so the foreground request never blocks on the
-    // Google Sheets export (which can be slow to time out). Run the export
-    // afterwards with targeted UPDATEs only: never re-read + rewrite the
-    // whole table, which is what resurrected just-deleted rows. Here we only
-    // touch the synced ids and append one event, so concurrent deletes
-    // cannot be undone.
-    res.status(202).json({ ok: true, records: hasDb() ? savedRecords : db.records, sync: { status: 'pending' } });
-
-    if (!hasDb()) {
-      // Local-dev fallback: same bookkeeping against the JSON store. Never
-      // touch Prisma here — with no DATABASE_URL the client cannot connect.
-      try {
-        const result = await syncRecordsToGoogle(cleaned);
-        const syncedAt = new Date().toISOString();
-        const latest = await readJsonDb();
-        const ids = new Set(cleaned.map((record) => record.id));
-        latest.records = (latest.records || []).map((record) => (ids.has(record.id)
-          ? { ...record, syncStatus: 'synced', syncError: '', syncedAt }
-          : record));
-        latest.syncEvents = [...(latest.syncEvents || []), { at: syncedAt, status: 'synced', detail: result }].slice(-200);
-        await writeJsonDb(latest);
-      } catch (error) {
-        const latest = await readJsonDb();
-        const ids = new Set(cleaned.map((record) => record.id));
-        latest.records = (latest.records || []).map((record) => (ids.has(record.id)
-          ? { ...record, syncStatus: 'pending', syncError: error.message }
-          : record));
-        latest.syncEvents = [...(latest.syncEvents || []), { at: new Date().toISOString(), status: 'pending', error: error.message }].slice(-200);
-        await writeJsonDb(latest);
-      }
-      return;
-    }
-
-    if (!acceptedRecords.length) return;
-
-    try {
-      const result = await syncRecordsToGoogle(acceptedRecords);
-      const syncedAt = new Date().toISOString();
-      const syncedIds = new Set(acceptedRecords.map((record) => record.id));
-      await prisma.$transaction(async (tx) => {
-        for (const id of syncedIds) {
-          await tx.record.updateMany({
-            where: { id },
-            data: { syncStatus: 'synced', syncError: '', syncedAt: new Date(syncedAt) },
-          });
-        }
-        await tx.syncEvent.create({
-          data: { at: new Date(syncedAt), status: 'synced', detail: result },
-        });
-        await pruneSyncEvents(tx);
-      });
-    } catch (error) {
-      await prisma.$transaction(async (tx) => {
-        for (const rec of acceptedRecords) {
-          await tx.record.updateMany({
-            where: { id: rec.id },
-            data: { syncStatus: 'pending', syncError: error.message },
-          });
-        }
-        await tx.syncEvent.create({
-          data: { at: new Date(), status: 'pending', error: error.message },
-        });
-        await pruneSyncEvents(tx);
-      });
-    }
+    const records = hasDb() ? savedRecords : (await readJsonDb()).records;
+    res.json({ ok: true, records });
   } catch (error) {
     res.status(error.status || 400).json({ ok: false, error: error.message });
   }
@@ -1531,81 +1220,6 @@ app.get('/api/daily-forms', asyncHandler(async (_req, res) => {
   res.json({ ok: true, forms: db.dailyForms || [] });
 }));
 
-app.post('/api/sync/retry', asyncHandler(async (_req, res) => {
-  const db = await readDb();
-  const pending = db.records.filter((record) => record.syncStatus !== 'synced');
-  if (hasDb()) {
-    try {
-      const result = await syncRecordsToGoogle(pending);
-      const remoteRecords = await pullRecordsFromGoogle();
-      const syncedAt = new Date().toISOString();
-      const latest = await mergeGoogleRecordsIntoPostgres(db.records, remoteRecords, syncedAt, {
-        at: syncedAt,
-        status: 'synced',
-        detail: { ...result, pulled: remoteRecords.length },
-      });
-      res.json({ ok: true, sync: { status: 'synced', ...result, pulled: remoteRecords.length }, records: latest.records });
-    } catch (error) {
-      const latest = await mergeGoogleRecordsIntoPostgres(db.records, [], null, {
-        status: 'pending',
-        error: error.message,
-      });
-      res.status(202).json({ ok: true, sync: { status: 'pending', error: error.message }, records: latest.records });
-    }
-    return;
-  }
-  try {
-    const result = await syncRecordsToGoogle(pending);
-    const remoteRecords = await pullRecordsFromGoogle();
-    const syncedAt = new Date().toISOString();
-    const pushedRecords = db.records.map((record) => record.syncStatus !== 'synced'
-      ? { ...record, syncStatus: 'synced', syncError: '', syncedAt }
-      : record);
-    db.records = mergeRecords(pushedRecords, remoteRecords);
-    db.syncEvents.push({ at: syncedAt, status: 'synced', detail: { ...result, pulled: remoteRecords.length } });
-    await writeJsonDb(db);
-    res.json({ ok: true, sync: { status: 'synced', ...result, pulled: remoteRecords.length }, records: db.records });
-  } catch (error) {
-    db.syncEvents.push({ at: new Date().toISOString(), status: 'pending', error: error.message });
-    await writeJsonDb(db);
-    res.status(202).json({ ok: true, sync: { status: 'pending', error: error.message }, records: db.records });
-  }
-}));
-
-app.post('/api/sync/pull', asyncHandler(async (_req, res) => {
-  const db = await readDb();
-  if (hasDb()) {
-    try {
-      const remoteRecords = await pullRecordsFromGoogle();
-      const pulledAt = new Date().toISOString();
-      const latest = await mergeGoogleRecordsIntoPostgres(db.records, remoteRecords, null, {
-        at: pulledAt,
-        status: 'pulled',
-        detail: { pulled: remoteRecords.length },
-      });
-      res.json({ ok: true, sync: { status: 'pulled', pulled: remoteRecords.length }, records: latest.records });
-    } catch (error) {
-      const latest = await mergeGoogleRecordsIntoPostgres(db.records, [], null, {
-        status: 'pull-failed',
-        error: error.message,
-      });
-      res.status(202).json({ ok: true, sync: { status: 'pending', error: error.message }, records: latest.records });
-    }
-    return;
-  }
-  try {
-    const remoteRecords = await pullRecordsFromGoogle();
-    db.records = mergeRecords(db.records, remoteRecords);
-    db.syncEvents.push({ at: new Date().toISOString(), status: 'pulled', detail: { pulled: remoteRecords.length } });
-    await writeJsonDb(db);
-    res.json({ ok: true, sync: { status: 'pulled', pulled: remoteRecords.length }, records: db.records });
-  } catch (error) {
-    db.syncEvents.push({ at: new Date().toISOString(), status: 'pull-failed', error: error.message });
-    await writeJsonDb(db);
-    res.status(202).json({ ok: true, sync: { status: 'pending', error: error.message }, records: db.records });
-  }
-}));
-
 app.get('*', (_req, res) => {
   res.sendFile(path.join(publicDir, 'index.html'));
 });
@@ -1640,4 +1254,4 @@ ensureSchema().then(() => {
   });
 });
 
-export { cleanRecord, syncRecordsToGoogle };
+export { cleanRecord };

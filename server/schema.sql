@@ -1,6 +1,5 @@
 -- PostgreSQL schema for Laundry Tracking PWA
 -- This replaces the JSON file (data/records.json) as the primary data store.
--- Google Sheets remains an optional export target only.
 
 -- Enable UUID extension (not required, but available if needed)
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
