@@ -2,9 +2,8 @@ import { enqueueMutation, readMutationQueue, removeQueuedMutation } from './sync
 import { DEFAULT_SHIFT_ORDER, SHIFT_KEYS, isCompleteShiftOrder, moveShift, normalizeShiftOrder, placeShift } from './shift-order.js';
 import { DEFAULT_MATERIAL_COLORS, applyMaterialColorMutation, isRetiredMaterialColor, normalizeMaterialColors } from './material-colors.js';
 import { buildMonthlyRevenue, formatCents, paginateInvoiceLines } from './billing.js';
-import { buildMonthlyDailyReport } from './monthly-report.js';
+import { getMonthlyCalendarDates } from './monthly-report.js';
 import {
-  createDailyMonthlyReportPdf,
   createInvoicePdf,
   createMonthlyRevenuePdf,
   createPdfFilename,
@@ -1169,6 +1168,14 @@ function pdfLibrary() {
   return Constructor;
 }
 
+function pdfExportErrorMessage(error, fallback) {
+  if (error instanceof Error && error.message.trim()) return error.message;
+  if (typeof error === 'string' && error.trim()) return error.trim();
+  if (error && typeof error.message === 'string' && error.message.trim()) return error.message;
+  if (error && typeof error.name === 'string' && error.name.trim()) return error.name;
+  return fallback;
+}
+
 async function freshExportRecords() {
   await persistDraft();
   if (navigator.onLine) {
@@ -1206,7 +1213,7 @@ async function runPdfExport(label, filename, createDocument, { refreshRecords = 
       ? `${label} sharing was cancelled.`
       : `${label} ${result === 'shared' ? 'is ready to save or share.' : 'download started.'}`;
   } catch (error) {
-    state.notice = `${label} could not be generated: ${error.message}`;
+    state.notice = `${label} could not be generated: ${pdfExportErrorMessage(error, 'An unexpected error occurred. Please reload the app and try again.')}`;
   } finally {
     pdfExportInProgress = false;
     document.querySelectorAll('[data-pdf-export]').forEach((button) => { button.disabled = false; });
@@ -1263,12 +1270,18 @@ async function createDailyRegisterSheetsPdf(jsPDF, dates) {
         && measuredColumnWidths.every((width) => Number.isFinite(width) && width > 0)
         ? measuredColumnWidths
         : REGISTER_COLUMN_WIDTHS;
-      const canvas = await window.html2canvas(sheet, {
-        scale: 1,
-        backgroundColor: '#ffffff',
-        windowWidth: 1160,
-        useCORS: true,
-      });
+      let canvas;
+      try {
+        canvas = await window.html2canvas(sheet, {
+          scale: 1,
+          backgroundColor: '#ffffff',
+          windowWidth: 1160,
+          useCORS: true,
+        });
+      } catch (error) {
+        const reason = pdfExportErrorMessage(error, 'The browser image renderer did not provide error details.');
+        throw new Error(`The daily register for ${formatDate(date)} could not be rendered: ${reason}`);
+      }
       if (!canvas.width || !canvas.height) throw new Error('The daily register rendered as an empty page.');
       const scale = 281 / canvas.width;
       const rows = Array.from(sheet.querySelectorAll('.laundry-register tr, .overall-table tr'),
@@ -1337,15 +1350,7 @@ function exportDailyRegister() {
 function exportDailyMonthlyReport() {
   const month = state.selectedMonth;
   return runPdfExport('Monthly Daily Register PDF', `laundry-monthly-daily-register-${month}.pdf`,
-    ({ jsPDF, records }) => {
-      const report = buildMonthlyDailyReport({ month, records, shiftOrder: state.shiftOrder });
-      return createDailyMonthlyReportPdf({
-        jsPDF,
-        report,
-        companyName: state.companyInfo?.name || 'MK Business Company Ltd.',
-        companyInfo: state.companyInfo || {},
-      });
-    },
+    ({ jsPDF }) => createDailyRegisterSheetsPdf(jsPDF, getMonthlyCalendarDates(month)),
     { refreshRecords: true, includeLogo: false });
 }
 
