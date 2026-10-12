@@ -1,4 +1,4 @@
-const CACHE_NAME = 'laundry-tracking-v19-register-pdf-export';
+const CACHE_NAME = 'laundry-tracking-v20-stable-register-export';
 const APP_SHELL = [
   './',
   './config.js',

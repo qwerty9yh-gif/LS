@@ -779,8 +779,6 @@ function render() {
       ${renderInvoiceFormModal()}
       ${renderInvoicePreview()}
     </div>
-    <div id="daily-print-document" aria-hidden="true"></div>
-    <div id="pdf-export-document" aria-hidden="true"></div>
   `;
   bindEvents(root);
   if (state.colorModal && state.colorModal.mode !== 'delete') root.querySelector('[data-color-label]')?.focus();
