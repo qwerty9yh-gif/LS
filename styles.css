@@ -77,6 +77,33 @@ h2 { font-size: 22px; line-height: 1.2; letter-spacing: 0.01em; }
 #pdf-export-document .no-print { display: none !important; }
 #pdf-export-document .laundry-register,
 #pdf-export-document .overall-table { min-width: 1160px; width: 1160px; }
+#pdf-export-document .register-title {
+  gap: 10px;
+  margin-bottom: 6px;
+  padding: 5px 8px;
+}
+#pdf-export-document .register-title h2 { font-size: 15px; }
+#pdf-export-document .shift-block { margin-bottom: 6px; }
+#pdf-export-document .laundry-register,
+#pdf-export-document .overall-table { font-size: 11px; }
+#pdf-export-document .laundry-register th,
+#pdf-export-document .laundry-register td,
+#pdf-export-document .overall-table th,
+#pdf-export-document .overall-table td {
+  padding: 3px 5px;
+  line-height: 1.1;
+}
+#pdf-export-document .laundry-register th { font-size: 10px; }
+#pdf-export-document .laundry-register th span { font-size: 9px; }
+#pdf-export-document .laundry-register td { height: 26px; }
+#pdf-export-document .shift-meta-row td { height: 46px; }
+#pdf-export-document .laundry-register input {
+  height: 22px;
+  min-height: 22px;
+  padding: 0 4px;
+}
+#pdf-export-document .overall-table { margin-top: 4px; }
+#pdf-export-document .overall-table td { font-size: 14px; }
 .new-form-button { font-weight: 900; }
 .day-picker-label { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 12px; font-weight: 800; text-transform: uppercase; }
 .modal-overlay {
