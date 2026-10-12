@@ -520,38 +520,26 @@ export function createPdfFilename(report, month) {
 }
 
 export function savePdfFile(doc, filename, {
-  navigatorObject = globalThis.navigator,
   documentObject = globalThis.document,
   urlObject = globalThis.URL,
-  fileConstructor = globalThis.File,
   schedule = globalThis.setTimeout,
 } = {}) {
   const blob = doc.output('blob');
   if (!(blob instanceof Blob) || blob.size === 0) throw new Error('PDF generation returned an empty file.');
-  const file = fileConstructor ? new fileConstructor([blob], filename, { type: 'application/pdf' }) : null;
-  const download = () => {
-    if (!documentObject?.createElement || !urlObject?.createObjectURL) {
-      throw new Error('This device does not support saving PDF files from the app.');
-    }
-    const objectUrl = urlObject.createObjectURL(blob);
-    const link = documentObject.createElement('a');
-    link.href = objectUrl;
-    link.download = filename;
-    link.rel = 'noopener';
-    link.style.display = 'none';
-    documentObject.body.appendChild(link);
-    link.click();
-    link.remove();
-    schedule(() => urlObject.revokeObjectURL(objectUrl), 60_000);
-    return 'downloaded';
-  };
-  if (file && navigatorObject?.canShare?.({ files: [file] }) && navigatorObject.share) {
-    return navigatorObject.share({ files: [file], title: filename })
-      .then(() => 'shared')
-      .catch((error) => {
-        if (error?.name === 'AbortError') return 'cancelled';
-        return download();
-      });
+
+  if (!documentObject?.createElement || !urlObject?.createObjectURL) {
+    throw new Error('This device does not support saving PDF files from the app.');
   }
-  return Promise.resolve(download());
+
+  const objectUrl = urlObject.createObjectURL(blob);
+  const link = documentObject.createElement('a');
+  link.href = objectUrl;
+  link.download = filename;
+  link.rel = 'noopener';
+  link.style.display = 'none';
+  documentObject.body?.appendChild(link);
+  link.click();
+  link.remove();
+  schedule(() => urlObject.revokeObjectURL(objectUrl), 60_000);
+  return Promise.resolve('downloaded');
 }

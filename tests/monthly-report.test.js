@@ -215,22 +215,14 @@ test('invoice PDF preserves invoice number, recipient, line items, and saved tot
   assert.match(pdf, /20\.00/);
 });
 
-test('PDF file saving shares on supported devices and falls back to an in-app download', async () => {
+test('PDF file saving triggers a normal browser download instead of a share flow', async () => {
   const doc = createMonthlyRevenuePdf({
     jsPDF,
     month: '2026-09',
     revenue: { lines: [], grandTotalCents: '0', complete: true },
   });
-  let sharedFile;
-  const result = await savePdfFile(doc, 'report.pdf', {
-    navigatorObject: {
-      canShare: ({ files }) => files.length === 1 && files[0].type === 'application/pdf',
-      share: async ({ files }) => { [sharedFile] = files; },
-    },
-  });
-  assert.equal(result, 'shared');
-  assert.equal(sharedFile.name, 'report.pdf');
 
+  let shared = false;
   let downloaded;
   let revoked;
   const fakeDocument = {
@@ -241,8 +233,12 @@ test('PDF file saving shares on supported devices and falls back to an in-app do
       style: {},
     }),
   };
-  await savePdfFile(doc, 'report.pdf', {
-    navigatorObject: {},
+
+  const result = await savePdfFile(doc, 'report.pdf', {
+    navigatorObject: {
+      canShare: ({ files }) => files.length === 1 && files[0].type === 'application/pdf',
+      share: async () => { shared = true; },
+    },
     documentObject: fakeDocument,
     urlObject: {
       createObjectURL: (blob) => {
@@ -253,6 +249,9 @@ test('PDF file saving shares on supported devices and falls back to an in-app do
     },
     schedule: (callback) => callback(),
   });
+
+  assert.equal(result, 'downloaded');
+  assert.equal(shared, false);
   assert.equal(downloaded.href, 'blob:laundry-report');
   assert.equal(downloaded.download, 'report.pdf');
   assert.equal(revoked, 'blob:laundry-report');
