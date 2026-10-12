@@ -1,3 +1,5 @@
+import { isRetiredMaterialColor } from './material-colors.js';
+
 const PAGE_WIDTH = 210;
 const PAGE_HEIGHT = 297;
 const MARGIN = 12;
@@ -192,7 +194,7 @@ function drawPaginatedRows(doc, {
   return y;
 }
 
-function drawReportTableRows(doc, { dateHeading, records, initialY, widths, getCells, labels }) {
+function drawReportTableRows(doc, { dateHeading, records, initialY, widths, getCells, labels, numericColumn }) {
   let y = initialY ?? drawPageHeading(doc, dateHeading);
   if (initialY !== undefined) {
     doc.setFont('helvetica', 'bold');
@@ -208,6 +210,7 @@ function drawReportTableRows(doc, { dateHeading, records, initialY, widths, getC
     y,
     widths,
     getCells,
+    numericColumn,
     breakPage: () => {
       doc.addPage();
       const continuedHeading = `${dateHeading} (continued)`;
@@ -236,6 +239,12 @@ export function createDailyMonthlyReportPdf({
   let firstDay = true;
 
   for (const day of report.days) {
+    const visibleRecords = day.records.filter((record) => {
+      const quantity = Number(record.quantity ?? 0);
+      const color = String(record.color ?? '').trim();
+      return !isRetiredMaterialColor(record.material, record.color) && !(color === '' && quantity === 0);
+    });
+
     let initialY;
     if (firstDay) {
       initialY = drawBrand(doc, {
@@ -251,17 +260,16 @@ export function createDailyMonthlyReportPdf({
     }
     drawReportTableRows(doc, {
       dateHeading: `${day.dateLabel} - Daily Laundry Records`,
-      records: day.records,
+      records: visibleRecords,
       initialY,
-      labels: ['Date / Shift', 'Material', 'Color', 'Quantity', 'Name / Signature - Laundry Personnel', 'Verified By', 'Status'],
-      widths: [22, 25, 21, 16, 49, 34, 19],
+      labels: ['Date / Shift', 'Material', 'Color', 'Quantity', 'Status'],
+      widths: [28, 28, 26, 18, 22],
+      numericColumn: 3,
       getCells: (record) => [
         `${record.date.slice(0, 10)} / ${shiftName(record.shift)}`,
         display(record.material),
         display(record.color),
         display(record.quantity),
-        `Name: ${display(record.laundryPersonnel)}\nSignature: ${display(record.signature)}`,
-        display(record.verifiedBy),
         statusName(record.status),
       ],
     });

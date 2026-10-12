@@ -299,7 +299,9 @@ function isLocked(date, shift) {
 }
 
 function recordsForDate(date) {
-  return state.records.filter((record) => record.date === date).map(normalizeRecord);
+  return state.records
+    .filter((record) => record.date === date && !isRetiredMaterialColor(record.material, record.color))
+    .map(normalizeRecord);
 }
 
 function recordsForShift(date, shift) {
@@ -1248,7 +1250,8 @@ function downloadInvoicePdf() {
 
 function dailyPrintMarkup(date) {
   const records = state.records
-    .filter((record) => String(record.date || '').slice(0, 10) === date)
+    .filter((record) => String(record.date || '').slice(0, 10) === date
+      && !isRetiredMaterialColor(record.material, record.color))
     .map(normalizeRecord);
   const brandName = state.companyInfo?.name || 'MK Business Company Ltd.';
   if (!records.length) {

@@ -16,10 +16,10 @@ test('monthly report groups in calendar order, respects shift order, and identif
     month: '2026-07',
     shiftOrder: ['night', 'morning', 'afternoon', 'evening'],
     records: [
-      { date: '2026-07-05', shift: 'morning', material: 'Trousers' },
-      { date: '2026-07-01', shift: 'morning', material: 'Shirts' },
-      { date: '2026-07-01', shift: 'night', material: 'Towels' },
-      { date: '2026-08-01', shift: 'morning', material: 'Outside month' },
+      { date: '2026-07-05', shift: 'morning', material: 'Trousers', color: 'Grey', quantity: 5 },
+      { date: '2026-07-01', shift: 'morning', material: 'Shirts', color: 'White', quantity: 8 },
+      { date: '2026-07-01', shift: 'night', material: 'Towels', color: 'White', quantity: 3 },
+      { date: '2026-08-01', shift: 'morning', material: 'Outside month', color: 'Red', quantity: 1 },
     ],
   });
 
@@ -55,21 +55,25 @@ test('an empty month reports every missing date and creates a valid branded PDF'
   assert.equal(doc.getNumberOfPages(), 2);
 });
 
-test('daily report PDFs include branded data and repeat date/table headings on overflow pages', () => {
+test('daily report PDFs include branded data, the required five columns, and omit blank zero rows', () => {
   const longPersonnel = `Laundry Personnel ${'name '.repeat(100)}`;
   const report = buildMonthlyDailyReport({
     month: '2026-07',
-    records: Array.from({ length: 90 }, (_, index) => ({
-      date: `2026-07-${index < 80 ? '01' : '04'}`,
-      shift: 'evening',
-      material: 'Table Clothes',
-      color: 'Blue and White',
-      quantity: 4,
-      laundryPersonnel: longPersonnel,
-      signature: 'A. Person',
-      verifiedBy: 'Supervisor',
-      status: 'received',
-    })),
+    records: [
+      ...Array.from({ length: 90 }, (_, index) => ({
+        date: `2026-07-${index < 80 ? '01' : '04'}`,
+        shift: 'evening',
+        material: 'Table Clothes',
+        color: 'White and Red',
+        quantity: 4,
+        laundryPersonnel: longPersonnel,
+        signature: 'A. Person',
+        verifiedBy: 'Supervisor',
+        status: 'received',
+      })),
+      { date: '2026-07-01', shift: 'morning', material: 'Bed Sheets', color: '', quantity: 0, status: 'received' },
+      { date: '2026-07-01', shift: 'night', material: 'Bed Sheets', color: 'Blue', quantity: 3, status: 'received' },
+    ],
   });
   const doc = createDailyMonthlyReportPdf({
     jsPDF,
@@ -83,7 +87,14 @@ test('daily report PDFs include branded data and repeat date/table headings on o
   assert.match(pdf, /July 2026 Day-by-Day Laundry Summary/);
   assert.match(pdf, /July 1, 2026 - Daily Laundry Records/);
   assert.match(pdf, /July 4, 2026 - Daily Laundry Records/);
-  assert.match(pdf, /Name \/ Signature/);
+  assert.match(pdf, /Date \/ Shift/);
+  assert.match(pdf, /Material/);
+  assert.match(pdf, /Color/);
+  assert.match(pdf, /Quantity/);
+  assert.match(pdf, /Status/);
+  assert.doesNotMatch(pdf, /Name \/ Signature/);
+  assert.doesNotMatch(pdf, /Verified By/);
+  assert.doesNotMatch(pdf, /Blue/);
   assert.match(pdf, /Monthly Dates Without Records/);
   assert.equal(createPdfFilename(null, '2026-09'), 'Laundry_Revenue_Report_September_2026.pdf');
   assert.equal(createPdfFilename(report), 'Laundry_Daily_Monthly_Report_July_2026.pdf');

@@ -1,3 +1,6 @@
+import { DEFAULT_SHIFT_ORDER } from './shift-order.js';
+import { isRetiredMaterialColor } from './material-colors.js';
+
 const DATE_FORMATTER = new Intl.DateTimeFormat('en-US', {
   month: 'long',
   day: 'numeric',
@@ -21,7 +24,18 @@ function formatDate(value) {
   return DATE_FORMATTER.format(new Date(`${value}T12:00:00Z`));
 }
 
-export function buildMonthlyDailyReport({ month, records, shiftOrder = ['morning', 'afternoon', 'evening', 'night'] }) {
+function shouldIncludeReportRecord(record) {
+  if (!record || typeof record !== 'object') return false;
+  const material = String(record.material ?? '').trim();
+  const color = String(record.color ?? '').trim();
+  const quantity = Number(record.quantity ?? 0);
+
+  if (isRetiredMaterialColor(material, color)) return false;
+  if (color === '' && quantity === 0) return false;
+  return true;
+}
+
+export function buildMonthlyDailyReport({ month, records, shiftOrder = DEFAULT_SHIFT_ORDER }) {
   if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(String(month || ''))) {
     throw new Error('A valid month is required.');
   }
@@ -30,11 +44,12 @@ export function buildMonthlyDailyReport({ month, records, shiftOrder = ['morning
   const [year, monthNumber] = month.split('-').map(Number);
   const dayCount = new Date(Date.UTC(year, monthNumber, 0)).getUTCDate();
   const grouped = new Map();
-  const shiftPositions = new Map(shiftOrder.map((shift, index) => [shift, index]));
+  const normalizedShiftOrder = Array.isArray(shiftOrder) && shiftOrder.length === 4 ? shiftOrder : DEFAULT_SHIFT_ORDER;
+  const shiftPositions = new Map(normalizedShiftOrder.map((shift, index) => [shift, index]));
 
   records.forEach((record, index) => {
     const date = String(record?.date ?? '').slice(0, 10);
-    if (!isCalendarDate(date) || date.slice(0, 7) !== month) return;
+    if (!isCalendarDate(date) || date.slice(0, 7) !== month || !shouldIncludeReportRecord(record)) return;
     if (!grouped.has(date)) grouped.set(date, []);
     grouped.get(date).push({ record, index });
   });
