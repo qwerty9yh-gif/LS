@@ -2,9 +2,8 @@ import { enqueueMutation, readMutationQueue, removeQueuedMutation } from './sync
 import { DEFAULT_SHIFT_ORDER, SHIFT_KEYS, isCompleteShiftOrder, moveShift, normalizeShiftOrder, placeShift } from './shift-order.js';
 import { DEFAULT_MATERIAL_COLORS, applyMaterialColorMutation, isRetiredMaterialColor, normalizeMaterialColors } from './material-colors.js';
 import { buildMonthlyRevenue, formatCents, paginateInvoiceLines } from './billing.js';
-import { buildMonthlyDailyReport } from './monthly-report.js';
+import { getMonthlyCalendarDates } from './monthly-report.js';
 import {
-  createDailyMonthlyReportPdf,
   createInvoicePdf,
   createMonthlyRevenuePdf,
   createPdfFilename,
@@ -1337,15 +1336,7 @@ function exportDailyRegister() {
 function exportDailyMonthlyReport() {
   const month = state.selectedMonth;
   return runPdfExport('Monthly Daily Register PDF', `laundry-monthly-daily-register-${month}.pdf`,
-    ({ jsPDF, records }) => {
-      const report = buildMonthlyDailyReport({ month, records, shiftOrder: state.shiftOrder });
-      return createDailyMonthlyReportPdf({
-        jsPDF,
-        report,
-        companyName: state.companyInfo?.name || 'MK Business Company Ltd.',
-        companyInfo: state.companyInfo || {},
-      });
-    },
+    ({ jsPDF }) => createDailyRegisterSheetsPdf(jsPDF, getMonthlyCalendarDates(month)),
     { refreshRecords: true, includeLogo: false });
 }
 

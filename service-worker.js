@@ -1,4 +1,4 @@
-const CACHE_NAME = 'laundry-tracking-v18-daily-register-pdf';
+const CACHE_NAME = 'laundry-tracking-v17-daily-register-pdf';
 const APP_SHELL = [
   './',
   './config.js',

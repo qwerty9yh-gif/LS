@@ -234,105 +234,9 @@ export function createDailyMonthlyReportPdf({
   companyInfo,
   logoData,
 }) {
-  if (typeof jsPDF !== 'function') throw new Error('The PDF generator is not available.');
-  const doc = new jsPDF({ unit: 'mm', format: 'a4', orientation: 'landscape' });
-  doc.setProperties({
-    creator: 'Laundry Tracking',
-    author: 'MK Business Company Ltd.',
-    title: 'Laundry Daily Register',
-    subject: 'Monthly Daily Register',
-  });
-  const pageWidth = doc.internal.pageSize.getWidth();
-  const pageHeight = doc.internal.pageSize.getHeight();
-  const margin = 7;
-  const contentWidth = pageWidth - margin * 2;
-  const footerY = pageHeight - 5;
+  const doc = makePdf(jsPDF);
   const identification = `${report.monthLabel} Day-by-Day Laundry Summary`;
-  const labels = ['Date', 'Shift', 'Material', 'Quantity'];
-  const widths = [27, 32, contentWidth - 27 - 32 - 25, 25];
-  const fontSize = 7.5;
-  let page = 0;
-
-  const addPage = () => {
-    if (page > 0) doc.addPage();
-    page += 1;
-  };
-  const drawTableHeader = (y) => {
-    doc.setFont('helvetica', 'bold');
-    doc.setFontSize(fontSize);
-    let x = margin;
-    const height = 5.5;
-    labels.forEach((label, index) => {
-      doc.setFillColor(...PALE_BLUE);
-      doc.setDrawColor(...LINE);
-      doc.rect(x, y, widths[index], height, 'FD');
-      doc.text(label, x + 1.5, y + 3.8);
-      x += widths[index];
-    });
-    doc.setFont('helvetica', 'normal');
-    return y + height;
-  };
-  const drawPageHeading = (title, subtitle, continued = false) => {
-    doc.setTextColor(...BLUE);
-    doc.setFont('helvetica', 'bold');
-    doc.setFontSize(12);
-    doc.text(safeText(companyName || 'MK Business Company Ltd.'), margin, 9);
-    doc.setFontSize(9);
-    doc.text(safeText(title) + (continued ? ' (continued)' : ''), margin, 14);
-    doc.setTextColor(...INK);
-    doc.setFont('helvetica', 'normal');
-    doc.setFontSize(7.5);
-    if (subtitle) doc.text(safeText(subtitle), margin, 18);
-    return subtitle ? 21 : 18;
-  };
-  const drawPageFooter = () => {
-    doc.setFont('helvetica', 'normal');
-    doc.setFontSize(7);
-    doc.setTextColor(101, 115, 138);
-    doc.text(safeText(identification), margin, footerY);
-    doc.text(`Page ${page}`, pageWidth - margin, footerY, { align: 'right' });
-    doc.setTextColor(...INK);
-  };
-  const drawRows = (records, date, initialY) => {
-    let y = initialY;
-    const startRowsAt = (isContinuation) => {
-      if (isContinuation) {
-        drawPageFooter();
-        addPage();
-        y = drawPageHeading(`${date} - Daily Laundry Records`, '', true);
-      }
-      y = drawTableHeader(y);
-    };
-    for (const record of records) {
-      const cells = [
-        date,
-        shiftName(record.shift),
-        `${display(record.material)}${String(record.color ?? '').trim() ? ` — ${display(record.color)}` : ''}`,
-        display(record.quantity),
-      ];
-      const linesByCell = cells.map((cell, index) =>
-        doc.splitTextToSize(safeText(cell), widths[index] - 3));
-      const lineCount = Math.max(...linesByCell.map((lines) => lines.length), 1);
-      const height = Math.max(4.2, lineCount * 2.8 + 1.4);
-      if (height > footerY - margin - 21) {
-        throw new Error('A monthly register entry is too long to fit on a printable page.');
-      }
-      if (y + height > footerY - 2) startRowsAt(true);
-      let x = margin;
-      linesByCell.forEach((lines, index) => {
-        doc.setDrawColor(...LINE);
-        doc.rect(x, y, widths[index], height);
-        if (index === 3) {
-          doc.text(lines, x + widths[index] - 1.5, y + 3.2, { align: 'right' });
-        } else {
-          doc.text(lines, x + 1.5, y + 3.2);
-        }
-        x += widths[index];
-      });
-      y += height;
-    }
-    return y;
-  };
+  let firstDay = true;
 
   for (const day of report.days) {
     const visibleRecords = day.records.filter((record) => {
@@ -340,127 +244,74 @@ export function createDailyMonthlyReportPdf({
       const color = String(record.color ?? '').trim();
       return !isRetiredMaterialColor(record.material, record.color) && !(color === '' && quantity === 0);
     });
-    if (!visibleRecords.length) continue;
-    addPage();
-    const y = drawPageHeading(
-      `${day.date} - Daily Laundry Records`,
-      `${report.monthLabel} · ${day.dateLabel}`,
-    );
-    const tableY = drawTableHeader(y);
-    const bottom = drawRows(visibleRecords, day.date, tableY);
-    const dailyTotal = visibleRecords.reduce((sum, record) => sum + Number(record.quantity ?? 0), 0);
-    if (bottom + 5.5 <= footerY - 2) {
-      doc.setFont('helvetica', 'bold');
-      doc.setFontSize(fontSize);
-      doc.setDrawColor(...LINE);
-      doc.rect(margin, bottom, contentWidth, 5.5);
-      doc.text(`Daily Total — ${day.date}`, margin + 1.5, bottom + 3.8);
-      doc.text(String(dailyTotal), pageWidth - margin - 1.5, bottom + 3.8, { align: 'right' });
-      doc.setFont('helvetica', 'normal');
+
+    let initialY;
+    if (firstDay) {
+      initialY = drawBrand(doc, {
+        companyName,
+        companyInfo,
+        logoData,
+        title: `${report.monthLabel} Day-by-Day Laundry Summary`,
+        subtitle: `Daily records from ${fullDate(`${report.month}-01`)} through ${fullDate(`${report.month}-${String(report.dayCount).padStart(2, '0')}`)}`,
+      });
+      firstDay = false;
     } else {
-      drawPageFooter();
-      addPage();
-      const totalsY = drawPageHeading(`${day.date} - Daily Total`, report.monthLabel);
-      doc.setFont('helvetica', 'bold');
-      doc.setFontSize(10);
-      doc.text(`Daily Total — ${day.date}: ${dailyTotal}`, margin, totalsY + 5);
-      doc.setFont('helvetica', 'normal');
+      doc.addPage();
     }
-    drawPageFooter();
+    drawReportTableRows(doc, {
+      dateHeading: `${day.dateLabel} - Daily Laundry Records`,
+      records: visibleRecords,
+      initialY,
+      labels: ['Date / Shift', 'Material', 'Color', 'Quantity', 'Status'],
+      widths: [28, 28, 26, 18, 22],
+      numericColumn: 3,
+      getCells: (record) => [
+        `${record.date.slice(0, 10)} / ${shiftName(record.shift)}`,
+        display(record.material),
+        display(record.color),
+        display(record.quantity),
+        statusName(record.status),
+      ],
+    });
   }
 
-  addPage();
+  if (report.days.length === 0) {
+    drawBrand(doc, {
+      companyName,
+      companyInfo,
+      logoData,
+      title: `${report.monthLabel} Day-by-Day Laundry Summary`,
+      subtitle: `No records were found from ${fullDate(`${report.month}-01`)} through ${fullDate(`${report.month}-${String(report.dayCount).padStart(2, '0')}`)}.`,
+    });
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(12);
+    doc.text('No records were found for this month.', MARGIN, 66);
+  }
+
+  doc.addPage();
   doc.setFont('helvetica', 'bold');
-  doc.setFontSize(12);
+  doc.setFontSize(16);
   doc.setTextColor(...BLUE);
-  doc.text('Monthly Dates Without Records', margin, 14);
+  doc.text('Monthly Dates Without Records', MARGIN, 24);
   doc.setTextColor(...INK);
   doc.setFont('helvetica', 'normal');
-  doc.setFontSize(fontSize);
-  doc.text(identification, margin, 19);
-  let y = 25;
+  doc.setFontSize(9);
+  doc.text(identification, MARGIN, 31);
+  let y = 41;
   if (report.missingDates.length === 0) {
-    doc.text('All dates in this month have recorded entries.', margin, y);
+    doc.text('All dates in this month have recorded entries.', MARGIN, y);
   } else {
     for (const { date, dateLabel } of report.missingDates) {
-      if (y + 5 > footerY - 2) {
-        drawPageFooter();
-        addPage();
-        doc.setFont('helvetica', 'bold');
-        doc.setFontSize(9);
-        doc.setTextColor(...BLUE);
-        doc.text('Monthly Dates Without Records (continued)', margin, 14);
-        doc.setTextColor(...INK);
-        doc.setFont('helvetica', 'normal');
-        doc.setFontSize(fontSize);
-        y = 20;
+      const lines = doc.splitTextToSize(`${dateLabel} - No records entered.`, CONTENT_WIDTH);
+      if (y + lines.length * 5 > FOOTER_Y - 2) {
+        doc.addPage();
+        y = drawPageHeading(doc, 'Monthly Dates Without Records', true);
       }
-      doc.text(`${date}  ${dateLabel} — No records entered`, margin, y);
-      y += 5;
+      doc.text(lines, MARGIN, y);
+      y += lines.length * 5 + 2;
     }
   }
-  drawPageFooter();
-
-  const totals = new Map();
-  for (const day of report.days) {
-    for (const record of day.records) {
-      if (isRetiredMaterialColor(record.material, record.color)) continue;
-      const color = String(record.color ?? '').trim();
-      const quantity = Number(record.quantity ?? 0);
-      if (color === '' && quantity === 0) continue;
-      const material = display(record.material);
-      const key = `${material}\u0000${color}`;
-      totals.set(key, (totals.get(key) || 0) + quantity);
-    }
-  }
-  addPage();
-  doc.setFont('helvetica', 'bold');
-  doc.setFontSize(12);
-  doc.setTextColor(...BLUE);
-  doc.text(`${report.monthLabel} Monthly Totals`, margin, 14);
-  doc.setTextColor(...INK);
-  doc.setFontSize(fontSize);
-  let totalsY = drawTableHeader(19);
-  let grandTotal = 0;
-  for (const [key, quantity] of totals) {
-    if (totalsY + 4.5 > footerY - 2) {
-      drawPageFooter();
-      addPage();
-      doc.setFont('helvetica', 'bold');
-      doc.setFontSize(9);
-      doc.setTextColor(...BLUE);
-      doc.text(`${report.monthLabel} Monthly Totals (continued)`, margin, 14);
-      doc.setTextColor(...INK);
-      totalsY = drawTableHeader(19);
-    }
-    const [material, color] = key.split('\u0000');
-    const name = `${material}${color ? ` — ${color}` : ''}`;
-    const lines = doc.splitTextToSize(name, widths[2] - 3);
-    const height = Math.max(4.2, lines.length * 2.8 + 1.4);
-    doc.setDrawColor(...LINE);
-    doc.rect(margin, totalsY, widths[0], height);
-    doc.rect(margin + widths[0], totalsY, widths[1], height);
-    doc.rect(margin + widths[0] + widths[1], totalsY, widths[2], height);
-    doc.rect(margin + widths[0] + widths[1] + widths[2], totalsY, widths[3], height);
-    doc.text(lines, margin + widths[0] + widths[1] + 1.5, totalsY + 3.2);
-    doc.text(String(quantity), pageWidth - margin - 1.5, totalsY + 3.2, { align: 'right' });
-    totalsY += height;
-    grandTotal += quantity;
-  }
-  if (totalsY + 6 > footerY - 2) {
-    drawPageFooter();
-    addPage();
-    doc.setFont('helvetica', 'bold');
-    doc.setFontSize(9);
-    doc.setTextColor(...BLUE);
-    doc.text(`${report.monthLabel} Monthly Totals (continued)`, margin, 14);
-    doc.setTextColor(...INK);
-    totalsY = 20;
-  }
-  doc.setFont('helvetica', 'bold');
-  doc.setFontSize(9);
-  doc.text(`Overall Monthly Total: ${grandTotal}`, margin, totalsY + 5);
-  drawPageFooter();
+  addPageNumberFooters(doc, identification);
   return doc;
 }
 
