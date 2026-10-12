@@ -35,6 +35,16 @@ function shouldIncludeReportRecord(record) {
   return true;
 }
 
+export function getMonthlyCalendarDates(month) {
+  if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(String(month || ''))) {
+    throw new Error('A valid month is required.');
+  }
+  const [year, monthNumber] = month.split('-').map(Number);
+  const dayCount = new Date(Date.UTC(year, monthNumber, 0)).getUTCDate();
+  return Array.from({ length: dayCount }, (_, index) =>
+    `${month}-${String(index + 1).padStart(2, '0')}`);
+}
+
 export function buildMonthlyDailyReport({ month, records, shiftOrder = DEFAULT_SHIFT_ORDER }) {
   if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(String(month || ''))) {
     throw new Error('A valid month is required.');
@@ -42,7 +52,8 @@ export function buildMonthlyDailyReport({ month, records, shiftOrder = DEFAULT_S
   if (!Array.isArray(records)) throw new Error('Monthly report records must be a list.');
 
   const [year, monthNumber] = month.split('-').map(Number);
-  const dayCount = new Date(Date.UTC(year, monthNumber, 0)).getUTCDate();
+  const dates = getMonthlyCalendarDates(month);
+  const dayCount = dates.length;
   const grouped = new Map();
   const normalizedShiftOrder = Array.isArray(shiftOrder) && shiftOrder.length === 4 ? shiftOrder : DEFAULT_SHIFT_ORDER;
   const shiftPositions = new Map(normalizedShiftOrder.map((shift, index) => [shift, index]));
@@ -67,8 +78,7 @@ export function buildMonthlyDailyReport({ month, records, shiftOrder = DEFAULT_S
   })).sort((left, right) => left.date.localeCompare(right.date));
 
   const recordedDates = new Set(days.map((day) => day.date));
-  const missingDates = Array.from({ length: dayCount }, (_, index) =>
-    `${month}-${String(index + 1).padStart(2, '0')}`)
+  const missingDates = dates
     .filter((date) => !recordedDates.has(date))
     .map((date) => ({ date, dateLabel: formatDate(date) }));
 

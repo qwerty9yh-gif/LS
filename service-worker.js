@@ -1,4 +1,4 @@
-const CACHE_NAME = 'laundry-tracking-v15-pwa-pdf-export';
+const CACHE_NAME = 'laundry-tracking-v16-daily-register-pdf';
 const APP_SHELL = [
   './',
   './config.js',
@@ -11,6 +11,7 @@ const APP_SHELL = [
   './billing.js',
   './monthly-report.js',
   './pdf-reports.js',
+  './vendor/html2canvas.min.js',
   './vendor/jspdf.umd.min.js',
   './manifest.webmanifest',
   './brand-logo.png',
@@ -50,7 +51,7 @@ self.addEventListener('fetch', (event) => {
   }
 
   const url = new URL(request.url);
-  const isAppAsset = ['/', '/index.html', '/app.js', '/sync-queue.js', '/shift-order.js', '/material-colors.js', '/billing.js', '/monthly-report.js', '/pdf-reports.js', '/vendor/jspdf.umd.min.js', '/styles.css', '/config.js', '/service-worker.js', '/brand-logo.png']
+  const isAppAsset = ['/', '/index.html', '/app.js', '/sync-queue.js', '/shift-order.js', '/material-colors.js', '/billing.js', '/monthly-report.js', '/pdf-reports.js', '/vendor/html2canvas.min.js', '/vendor/jspdf.umd.min.js', '/styles.css', '/config.js', '/service-worker.js', '/brand-logo.png']
     .some((path) => url.pathname.endsWith(path));
 
   event.respondWith(

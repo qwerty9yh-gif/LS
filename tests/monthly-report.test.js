@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildMonthlyDailyReport } from '../monthly-report.js';
+import { buildMonthlyDailyReport, getMonthlyCalendarDates } from '../monthly-report.js';
 import { jsPDF } from 'jspdf';
 import {
   createDailyMonthlyReportPdf,
@@ -35,6 +35,15 @@ test('month day counts handle leap February and 30-day months', () => {
   assert.equal(buildMonthlyDailyReport({ month: '2026-02', records: [] }).dayCount, 28);
   assert.equal(buildMonthlyDailyReport({ month: '2026-04', records: [] }).dayCount, 30);
   assert.equal(buildMonthlyDailyReport({ month: '2026-01', records: [] }).dayCount, 31);
+});
+
+test('monthly daily register dates include every calendar day in order', () => {
+  assert.equal(getMonthlyCalendarDates('2024-02').length, 29);
+  assert.equal(getMonthlyCalendarDates('2026-02').length, 28);
+  assert.equal(getMonthlyCalendarDates('2026-04').length, 30);
+  assert.deepEqual(getMonthlyCalendarDates('2026-04').slice(0, 2), ['2026-04-01', '2026-04-02']);
+  assert.equal(getMonthlyCalendarDates('2026-04').at(-1), '2026-04-30');
+  assert.throws(() => getMonthlyCalendarDates('2026-13'), /valid month/);
 });
 
 test('an empty month reports every missing date and creates a valid branded PDF', () => {

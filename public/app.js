@@ -2,9 +2,8 @@ import { enqueueMutation, readMutationQueue, removeQueuedMutation } from './sync
 import { DEFAULT_SHIFT_ORDER, SHIFT_KEYS, isCompleteShiftOrder, moveShift, normalizeShiftOrder, placeShift } from './shift-order.js';
 import { DEFAULT_MATERIAL_COLORS, applyMaterialColorMutation, isRetiredMaterialColor, normalizeMaterialColors } from './material-colors.js';
 import { buildMonthlyRevenue, formatCents, paginateInvoiceLines } from './billing.js';
-import { buildMonthlyDailyReport } from './monthly-report.js';
+import { getMonthlyCalendarDates } from './monthly-report.js';
 import {
-  createDailyMonthlyReportPdf,
   createInvoicePdf,
   createMonthlyRevenuePdf,
   createPdfFilename,
@@ -37,12 +36,6 @@ function orderedDailyShifts() {
   const shiftsByKey = new Map(SHIFTS.map((shift) => [shift.key, shift]));
   return normalizeShiftOrder(state.shiftOrder).map((key) => shiftsByKey.get(key));
 }
-
-const STATUS_LABELS = {
-  received: 'Received',
-  pending: 'Pending Dispatch',
-  dispatched: 'Dispatched'
-};
 
 const STORAGE_KEY = 'laundry-tracking-state-v4';
 const LEGACY_STORAGE_KEYS = ['laundry-tracking-state-v3', 'laundry-tracking-state-v2'];
@@ -785,6 +778,7 @@ function render() {
       ${renderInvoicePreview()}
     </div>
     <div id="daily-print-document" aria-hidden="true"></div>
+    <div id="pdf-export-document" aria-hidden="true"></div>
   `;
   bindEvents(root);
   if (state.colorModal && state.colorModal.mode !== 'delete') root.querySelector('[data-color-label]')?.focus();
@@ -815,26 +809,7 @@ function renderDailyPage() {
         </div>
       </div>
       <div class="print-area">
-        <div class="register-title">
-          <h2>Daily Register — ${formatDate(state.selectedDate)}</h2>
-          <div>Date: <strong>${formatDate(state.selectedDate)}</strong></div>
-        </div>
-        <div class="no-print" style="margin-bottom:10px;display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
-          <span class="subtle">Viewing form for <strong>${formatDate(state.selectedDate)}</strong> · ${dates.length} saved form${dates.length === 1 ? '' : 's'} · editing one day never affects another.</span>
-          <span style="flex:1"></span>
-          <button class="primary-button" data-action="daily-print">Daily Print</button>
-        </div>
-        <div class="shift-list" data-shift-list>
-          ${orderedDailyShifts().map((shift) => renderShiftBlock(shift)).join('')}
-        </div>
-        <table class="overall-table" aria-label="Overall daily total">
-          <tbody>
-            <tr>
-              <th>Overall Daily Total — ${formatDate(state.selectedDate)}</th>
-              <td data-daily-total>${dailyTotal(state.selectedDate)}</td>
-            </tr>
-          </tbody>
-        </table>
+        ${renderDailyRegisterTemplate(state.selectedDate, { controls: true, savedDateCount: dates.length })}
       </div>
     </section>
     ${renderFormModal()}
@@ -902,10 +877,37 @@ function renderColorModal() {
   `;
 }
 
-function renderShiftBlock(shift) {
-  const rows = canonicalRows(state.selectedDate, shift.key);
-  const archived = archivedRows(state.selectedDate, shift.key);
-  const locked = isLocked(state.selectedDate, shift.key);
+function renderDailyRegisterTemplate(date, { exporting = false, controls = false, savedDateCount = 0 } = {}) {
+  return `
+    <div class="register-title">
+      <h2>Daily Register — ${formatDate(date)}</h2>
+      <div>Date: <strong>${formatDate(date)}</strong></div>
+    </div>
+    ${controls ? `
+      <div class="no-print" style="margin-bottom:10px;display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+        <span class="subtle">Viewing form for <strong>${formatDate(date)}</strong> · ${savedDateCount} saved form${savedDateCount === 1 ? '' : 's'} · editing one day never affects another.</span>
+        <span style="flex:1"></span>
+        <button class="primary-button" data-action="daily-print">Daily Print</button>
+        <button class="primary-button" data-pdf-export data-action="export-daily-register">Export Daily PDF</button>
+      </div>` : ''}
+    <div class="shift-list" data-shift-list>
+      ${orderedDailyShifts().map((shift) => renderShiftBlock(shift, date, exporting)).join('')}
+    </div>
+    <table class="overall-table" aria-label="Overall daily total">
+      <tbody>
+        <tr>
+          <th>Overall Daily Total — ${formatDate(date)}</th>
+          <td data-daily-total>${dailyTotal(date)}</td>
+        </tr>
+      </tbody>
+    </table>
+  `;
+}
+
+function renderShiftBlock(shift, date = state.selectedDate, exporting = false) {
+  const rows = canonicalRows(date, shift.key);
+  const archived = archivedRows(date, shift.key);
+  const locked = isLocked(date, shift.key);
   const shiftMeta = rows.find((row) => row.laundryPersonnel || row.verifiedBy || row.signature) || {};
   return `
     <section class="shift-block ${locked ? 'locked' : ''}" data-shift-block="${shift.key}">
@@ -929,7 +931,7 @@ function renderShiftBlock(shift) {
         <tbody>
           <tr class="shift-meta-row">
             <td>
-              <strong>${formatDate(state.selectedDate)}</strong>
+              <strong>${formatDate(date)}</strong>
               <span>${shift.label}</span>
               <span>${shift.time}</span>
             </td>
@@ -944,7 +946,7 @@ function renderShiftBlock(shift) {
             </td>
             <td><input data-shift="${shift.key}" data-shift-field="verifiedBy" value="${escapeAttr(shiftMeta.verifiedBy || '')}" ${locked ? 'readonly' : ''}></td>
           </tr>
-          ${MATERIALS.map((material) => renderMaterialRows(shift, material, rows, locked)).join('')}
+          ${MATERIALS.map((material) => renderMaterialRows(shift, material, rows, locked, date, exporting)).join('')}
           ${archived.length ? `
           <tr class="material-heading archived-heading">
             <td></td>
@@ -962,7 +964,7 @@ function renderShiftBlock(shift) {
           <tr class="shift-total-row">
             <td></td>
             <td>Shift Total</td>
-            <td data-shift-total="${shift.key}">${shiftTotal(state.selectedDate, shift.key)}</td>
+            <td data-shift-total="${shift.key}">${shiftTotal(date, shift.key)}</td>
             <td></td>
             <td></td>
           </tr>
@@ -972,8 +974,10 @@ function renderShiftBlock(shift) {
   `;
 }
 
-function renderMaterialRows(shift, material, allRows, locked) {
-  const rows = allRows.filter((row) => row.material === material.label);
+function renderMaterialRows(shift, material, allRows, locked, date = state.selectedDate, exporting = false) {
+  const rows = allRows.filter((row) => row.material === material.label
+    && !isRetiredMaterialColor(row.material, row.color)
+    && !(exporting && String(row.color ?? '').trim() === '' && quantityNumber(row.quantity) === 0));
   return `
     <tr class="material-heading">
       <td></td>
@@ -982,22 +986,24 @@ function renderMaterialRows(shift, material, allRows, locked) {
         <button class="mini-button no-print" data-add-color="${escapeAttr(material.label)}">Add Color</button>
       </td>
     </tr>
-    ${rows.map((row) => renderColorRow(row, locked)).join('')}
+    ${rows.map((row) => renderColorRow(row, locked, exporting)).join('')}
     <tr class="material-total-row">
       <td></td>
       <td>Total ${material.label}</td>
-      <td data-material-total="${shift.key}:${material.label}">${materialTotal(state.selectedDate, shift.key, material.label)}</td>
+      <td data-material-total="${shift.key}:${material.label}">${materialTotal(date, shift.key, material.label)}</td>
       <td></td>
       <td></td>
     </tr>
   `;
 }
 
-function renderColorRow(row, locked) {
+function renderColorRow(row, locked, exporting = false) {
   const canDelete = !row.fixed;
   const colorIsManaged = materialColorsFor(row.material).some((item) => item.label === row.color);
   const isRetiredHistory = isRetiredMaterialColor(row.material, row.color);
-  const colorLabel = colorIsManaged
+  const colorLabel = exporting
+    ? `<span>${escapeHtml(row.color || 'Unlabelled')}</span>`
+    : colorIsManaged
     ? `<span class="color-label-controls"><button class="color-label-button no-print" data-color-edit-material="${escapeAttr(row.material)}" data-color-edit-label="${escapeAttr(row.color)}">${escapeHtml(row.color)}</button><button class="color-delete-button no-print" data-color-delete-material="${escapeAttr(row.material)}" data-color-delete-label="${escapeAttr(row.color)}" aria-label="Delete ${escapeAttr(row.color)} from ${escapeAttr(row.material)}" title="Delete color">×</button></span>`
     : `<span class="retired-color-label">${escapeHtml(row.color || 'Unlabelled')}${isRetiredHistory ? ' · historical' : ''}</span>`;
   return `
@@ -1066,7 +1072,7 @@ function renderMonthlyPage() {
         <div class="monthly-export-actions">
           <button type="button" class="primary-button" data-pdf-export data-action="export-monthly-revenue">Export PDF</button>
           <button type="button" class="primary-button" data-action="open-invoice-form">Generate Monthly Invoice</button>
-          <button type="button" class="primary-button" data-pdf-export data-action="export-daily-monthly-report">Export Daily Monthly Report (PDF)</button>
+          <button type="button" class="primary-button" data-pdf-export data-action="export-daily-monthly-report">Monthly Report (Daily Register PDF)</button>
         </div>
       </div>
       <div class="table-wrap billing-table-wrap">
@@ -1172,7 +1178,7 @@ async function freshExportRecords() {
   return state.records;
 }
 
-async function runPdfExport(label, filename, createDocument, { refreshRecords = false } = {}) {
+async function runPdfExport(label, filename, createDocument, { refreshRecords = false, includeLogo = true } = {}) {
   if (pdfExportInProgress) {
     state.notice = 'A PDF is already being prepared. Please wait for it to finish.';
     renderStatusOnly();
@@ -1184,8 +1190,8 @@ async function runPdfExport(label, filename, createDocument, { refreshRecords = 
   renderStatusOnly();
   try {
     const records = refreshRecords ? await freshExportRecords() : null;
-    const logoData = await getBrandLogoData();
-    const doc = createDocument({
+    const logoData = includeLogo ? await getBrandLogoData() : null;
+    const doc = await createDocument({
       jsPDF: pdfLibrary(),
       records,
       logoData,
@@ -1221,19 +1227,112 @@ function exportMonthlyRevenue() {
   }, { refreshRecords: true });
 }
 
+async function createDailyRegisterSheetsPdf(jsPDF, dates) {
+  if (typeof jsPDF !== 'function') throw new Error('The PDF generator is not available.');
+  if (!Array.isArray(dates) || !dates.length || dates.some((date) => !isValidFormDate(date))) {
+    throw new Error('Valid daily register dates are required to generate the PDF.');
+  }
+  const exportRoot = document.getElementById('pdf-export-document');
+  if (!exportRoot) throw new Error('The PDF export template could not be mounted.');
+
+  const doc = new jsPDF({ unit: 'mm', format: 'a4', orientation: 'landscape' });
+  doc.setProperties({
+    title: 'Laundry Daily Register',
+    subject: 'Daily Laundry Register',
+    author: 'MK Business Company Ltd.',
+    creator: 'Laundry Tracking',
+  });
+
+  try {
+    await document.fonts?.ready;
+    let firstPdfPage = true;
+    for (const date of dates) {
+      exportRoot.innerHTML = `<article class="pdf-register-sheet"><div class="print-area">${renderDailyRegisterTemplate(date, { exporting: true })}</div></article>`;
+      const sheet = exportRoot.firstElementChild;
+      if (typeof window.html2canvas !== 'function') {
+        throw new Error('The PDF image renderer is not available. Reload the app and try again.');
+      }
+      const columnWidths = Array.from(sheet.querySelectorAll('.laundry-register thead tr:first-child th'),
+        (cell) => cell.getBoundingClientRect().width);
+      if (columnWidths.length !== 5 || columnWidths.some((width) => !Number.isFinite(width) || width <= 0)) {
+        throw new Error('The daily register columns could not be measured for PDF export.');
+      }
+      const canvas = await window.html2canvas(sheet, {
+        scale: 1,
+        backgroundColor: '#ffffff',
+        windowWidth: 1160,
+        useCORS: true,
+      });
+      if (!canvas.width || !canvas.height) throw new Error('The daily register rendered as an empty page.');
+      const scale = 281 / canvas.width;
+      const rows = Array.from(sheet.querySelectorAll('.laundry-register tr, .overall-table tr'),
+        (row) => Math.round((row.getBoundingClientRect().bottom - sheet.getBoundingClientRect().top)));
+      let offset = 0;
+
+      while (offset < canvas.height) {
+        const continuation = offset > 0;
+        const imageY = continuation ? 18 : 8;
+        const availableHeightMm = 210 - imageY - 8;
+        const targetBottom = Math.min(canvas.height, offset + Math.floor(availableHeightMm / scale));
+        const safeBottom = rows.filter((bottom) => bottom > offset && bottom <= targetBottom).at(-1);
+        const end = targetBottom === canvas.height ? canvas.height : safeBottom || targetBottom;
+        const fragmentHeight = end - offset;
+        const fragment = document.createElement('canvas');
+        fragment.width = canvas.width;
+        fragment.height = fragmentHeight;
+        const context = fragment.getContext('2d');
+        if (!context) throw new Error('The daily register image could not be prepared for PDF export.');
+        context.fillStyle = '#ffffff';
+        context.fillRect(0, 0, fragment.width, fragment.height);
+        context.drawImage(canvas, 0, offset, canvas.width, fragmentHeight, 0, 0, canvas.width, fragmentHeight);
+
+        if (!firstPdfPage) doc.addPage();
+        firstPdfPage = false;
+        if (continuation) drawRegisterContinuationHeader(doc, formatDate(date), columnWidths);
+        doc.addImage(fragment.toDataURL('image/jpeg', 0.9), 'JPEG', 8, imageY, 281, fragmentHeight * scale, undefined, 'FAST');
+        offset = end;
+      }
+    }
+  } finally {
+    exportRoot.replaceChildren();
+  }
+  return doc;
+}
+
+function drawRegisterContinuationHeader(doc, dateLabel, columnWidths) {
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(8);
+  doc.setTextColor(23, 48, 77);
+  doc.text(`Daily Register — ${dateLabel} (continued)`, 8, 5);
+  const labels = ['Date / Shift', 'Material', 'Quantity', 'Name & Signature\nLaundry Personnel', 'Verified By'];
+  const totalWidth = columnWidths.reduce((sum, width) => sum + width, 0);
+  const widths = columnWidths.map((width) => 281 * width / totalWidth);
+  const y = 8;
+  const height = 9;
+  let x = 8;
+  doc.setFontSize(7.5);
+  labels.forEach((label, index) => {
+    doc.setFillColor(237, 243, 255);
+    doc.setDrawColor(154, 169, 188);
+    doc.rect(x, y, widths[index], height, 'FD');
+    doc.text(doc.splitTextToSize(label, widths[index] - 2), x + 1, y + 3);
+    x += widths[index];
+  });
+  doc.setTextColor(23, 48, 77);
+}
+
+function exportDailyRegister() {
+  const date = state.selectedDate;
+  return runPdfExport('Daily Register PDF', `laundry-daily-register-${date}.pdf`,
+    ({ jsPDF }) => createDailyRegisterSheetsPdf(jsPDF, [date]),
+    { refreshRecords: true, includeLogo: false });
+}
+
 function exportDailyMonthlyReport() {
   const month = state.selectedMonth;
-  const filename = createPdfFilename({ month });
-  return runPdfExport('Daily Monthly Report PDF', filename, ({ jsPDF, records, logoData, companyName, companyInfo }) => {
-    const report = buildMonthlyDailyReport({
-      month,
-      records,
-      shiftOrder: state.shiftOrder,
-    });
-    return createDailyMonthlyReportPdf({
-      jsPDF, report, logoData, companyName, companyInfo,
-    });
-  }, { refreshRecords: true });
+  return runPdfExport('Monthly Daily Register PDF', `laundry-monthly-daily-register-${month}.pdf`,
+    ({ jsPDF }) => createDailyRegisterSheetsPdf(jsPDF, getMonthlyCalendarDates(month)),
+    { refreshRecords: true, includeLogo: false });
 }
 
 function downloadInvoicePdf() {
@@ -1249,40 +1348,7 @@ function downloadInvoicePdf() {
 }
 
 function dailyPrintMarkup(date) {
-  const records = state.records
-    .filter((record) => String(record.date || '').slice(0, 10) === date
-      && !isRetiredMaterialColor(record.material, record.color))
-    .map(normalizeRecord);
-  const brandName = state.companyInfo?.name || 'MK Business Company Ltd.';
-  if (!records.length) {
-    return `<article class="daily-print-page">
-      <header class="daily-print-brand"><img src="./brand-logo.png" alt="${escapeAttr(brandName)}"><div><h1>${escapeHtml(brandName)}</h1><h2>Daily Register — ${escapeHtml(formatDate(date))}</h2></div></header>
-      <p class="daily-print-empty">No records are available for ${escapeHtml(formatDate(date))}.</p>
-    </article>`;
-  }
-  const rowsByShift = new Map(orderedDailyShifts().map((shift) => [shift.key,
-    records.filter((record) => record.shift === shift.key)]));
-  const sections = orderedDailyShifts().filter((shift) => rowsByShift.get(shift.key).length).map((shift) => `
-    <section class="daily-print-shift">
-      <h3>${escapeHtml(shift.label)} Shift</h3>
-      <table class="daily-print-table">
-        <thead><tr><th>Date / Shift</th><th>Material</th><th>Quantity</th><th>Name &amp; Signature — Laundry Personnel</th><th>Verified By</th><th>Status</th></tr></thead>
-        <tbody>${rowsByShift.get(shift.key).map((record) => `
-          <tr>
-            <td>${escapeHtml(formatDate(date))}<br>${escapeHtml(shift.label)}</td>
-            <td>${escapeHtml(record.material)}${record.color ? `<br>${escapeHtml(record.color)}` : ''}</td>
-            <td>${escapeHtml(quantityValue(record.quantity) || '—')}</td>
-            <td>Name: ${escapeHtml(record.laundryPersonnel || '—')}<br>Signature: ${escapeHtml(record.signature || '—')}</td>
-            <td>${escapeHtml(record.verifiedBy || '—')}</td>
-            <td>${escapeHtml(STATUS_LABELS[record.status] || record.status || '—')}</td>
-          </tr>`).join('')}</tbody>
-      </table>
-    </section>`).join('');
-  return `<article class="daily-print-page">
-    <header class="daily-print-brand"><img src="./brand-logo.png" alt="${escapeAttr(brandName)}"><div><h1>${escapeHtml(brandName)}</h1><h2>Daily Register — ${escapeHtml(formatDate(date))}</h2></div></header>
-    ${sections}
-    <p class="daily-print-total">Overall Daily Total — ${escapeHtml(formatDate(date))}: <strong>${dailyTotal(date)}</strong></p>
-  </article>`;
+  return `<article class="daily-print-page">${renderDailyRegisterTemplate(date, { exporting: true })}</article>`;
 }
 
 async function printDailyRecords(date) {
@@ -1712,6 +1778,7 @@ function bindEvents(root) {
       const action = element.dataset.action;
       if (action === 'save-unit-prices') await saveUnitPrices(root);
       if (action === 'export-monthly-revenue') await exportMonthlyRevenue();
+      if (action === 'export-daily-register') await exportDailyRegister();
       if (action === 'export-daily-monthly-report') await exportDailyMonthlyReport();
       if (action === 'download-invoice-pdf') await downloadInvoicePdf();
       if (action === 'daily-print') {
