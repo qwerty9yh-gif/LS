@@ -58,13 +58,14 @@ test('an empty month reports every missing date and creates a valid branded PDF'
   assert.equal(report.missingDates.length, 28);
   assert.equal(report.monthLabel, 'February 2026');
   assert.match(pdf, /%PDF-/);
-  assert.match(pdf, /No records were found for this month/);
   assert.match(pdf, /Monthly Dates Without Records/);
+  assert.match(pdf, /2026-02-01/);
   assert.match(pdf, /No records entered/);
+  assert.match(pdf, /Overall Monthly Total: 0/);
   assert.equal(doc.getNumberOfPages(), 2);
 });
 
-test('daily report PDFs include branded data, the required five columns, and omit blank zero rows', () => {
+test('daily register PDFs use four compact columns, preserve totals, and omit blank zero rows', () => {
   const longPersonnel = `Laundry Personnel ${'name '.repeat(100)}`;
   const report = buildMonthlyDailyReport({
     month: '2026-07',
@@ -91,22 +92,66 @@ test('daily report PDFs include branded data, the required five columns, and omi
   });
   const pdf = Buffer.from(doc.output('arraybuffer')).toString('latin1');
 
-  assert.ok(doc.getNumberOfPages() > 3);
+  assert.ok(doc.getNumberOfPages() <= 6);
   assert.match(pdf, /MK Business Company Ltd/);
-  assert.match(pdf, /July 2026 Day-by-Day Laundry Summary/);
-  assert.match(pdf, /July 1, 2026 - Daily Laundry Records/);
-  assert.match(pdf, /July 4, 2026 - Daily Laundry Records/);
-  assert.match(pdf, /Date \/ Shift/);
+  assert.match(pdf, /July 2026 Monthly Totals/);
+  assert.match(pdf, /2026-07-01 - Daily Laundry Records/);
+  assert.match(pdf, /2026-07-04 - Daily Laundry Records/);
+  assert.match(pdf, /Date/);
+  assert.match(pdf, /Shift/);
   assert.match(pdf, /Material/);
-  assert.match(pdf, /Color/);
   assert.match(pdf, /Quantity/);
-  assert.match(pdf, /Status/);
+  assert.match(pdf, /Overall Monthly Total: 360/);
+  assert.match(pdf, /Table Clothes/);
+  assert.match(pdf, /Straight Day/);
+  assert.doesNotMatch(pdf, /Status/);
+  assert.doesNotMatch(pdf, /Name & Signature/);
   assert.doesNotMatch(pdf, /Name \/ Signature/);
   assert.doesNotMatch(pdf, /Verified By/);
   assert.doesNotMatch(pdf, /Blue/);
   assert.match(pdf, /Monthly Dates Without Records/);
   assert.equal(createPdfFilename(null, '2026-09'), 'Laundry_Revenue_Report_September_2026.pdf');
   assert.equal(createPdfFilename(report), 'Laundry_Daily_Monthly_Report_July_2026.pdf');
+});
+
+test('a populated 30-day register stays within the typical monthly page target', () => {
+  const records = Array.from({ length: 30 }, (_, day) =>
+    ['night', 'morning', 'evening', 'afternoon'].flatMap((shift) =>
+      [1, 2, 3].map((quantity) => ({
+        date: `2026-09-${String(day + 1).padStart(2, '0')}`,
+        shift,
+        material: 'Shirts',
+        color: 'White',
+        quantity,
+      }))));
+  const report = buildMonthlyDailyReport({ month: '2026-09', records: records.flat() });
+  const doc = createDailyMonthlyReportPdf({ jsPDF, report });
+  const pdf = Buffer.from(doc.output('arraybuffer')).toString('latin1');
+
+  assert.equal(report.days.length, 30);
+  assert.ok(doc.getNumberOfPages() <= 60);
+  assert.equal(doc.getNumberOfPages(), 32);
+  assert.match(pdf, /Overall Monthly Total: 720/);
+  assert.match(pdf, /2026-09-01/);
+  assert.match(pdf, /2026-09-30/);
+});
+
+test('a high-volume shift keeps all 80 entries within two register pages', () => {
+  const records = Array.from({ length: 80 }, (_, index) => ({
+    date: '2026-09-01',
+    shift: 'night',
+    material: 'Shirts',
+    color: 'White',
+    quantity: index + 1,
+  }));
+  const report = buildMonthlyDailyReport({ month: '2026-09', records });
+  const doc = createDailyMonthlyReportPdf({ jsPDF, report });
+  const pdf = Buffer.from(doc.output('arraybuffer')).toString('latin1');
+
+  assert.equal(doc.getNumberOfPages(), 4);
+  assert.match(pdf, /Overall Monthly Total: 3240/);
+  assert.match(pdf, /Daily Laundry Records/);
+  assert.match(pdf, /\\\(continued\\\)/);
 });
 
 test('monthly revenue PDFs contain the provided summary data and totals', () => {

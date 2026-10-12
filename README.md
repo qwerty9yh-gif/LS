@@ -75,12 +75,14 @@ print the current invoice in the installed app. Configure fixed company
 information with the optional server environment variables above.
 
 **Export Daily PDF** and **Monthly Report (Daily Register PDF)** download PDFs
-rendered from the same daily-register template used on screen. The daily export
-contains the selected date; the monthly export repeats the full register,
-including empty days, for every calendar date in the selected month. Both use
-the register's existing shift order, material rows, and totals and download
-directly without opening a tab or invoking a share/clipboard flow. The monthly
-revenue summary, invoice calculations, and invoice numbering are unchanged.
+rendered for the selected reporting period. The daily export uses the on-screen
+register template. The monthly export uses a compact Date, Shift, Material, and
+Quantity table for dates with records, repeats its headings across pages, and
+includes daily totals, dates without records, and a final monthly totals page.
+Material labels retain their color detail. Both exports use the register's
+shift order and download directly without opening a tab or invoking a
+share/clipboard flow. The monthly revenue summary, invoice calculations, and
+invoice numbering are unchanged.
 PDF document content and metadata do not include the application URL.
 
 **Daily Print** prints the currently selected register date. **Print This Day**
