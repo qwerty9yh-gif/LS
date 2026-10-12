@@ -27,6 +27,8 @@ const MATERIALS = [
   { key: 'bedsheets', label: 'Bed Sheets' }
 ];
 
+const REGISTER_COLUMN_WIDTHS = [18, 33, 13, 21, 15];
+
 // Retired categories: never rendered as editable sections, never counted in
 // any total — but historical rows stay readable in Daily Records / print.
 const RETIRED_MATERIALS = new Set(['Uniforms']);
@@ -1249,14 +1251,17 @@ async function createDailyRegisterSheetsPdf(jsPDF, dates) {
     for (const date of dates) {
       exportRoot.innerHTML = `<article class="pdf-register-sheet"><div class="print-area">${renderDailyRegisterTemplate(date, { exporting: true })}</div></article>`;
       const sheet = exportRoot.firstElementChild;
+      if (!sheet?.isConnected) throw new Error('The daily register template could not be rendered for PDF export.');
       if (typeof window.html2canvas !== 'function') {
         throw new Error('The PDF image renderer is not available. Reload the app and try again.');
       }
-      const columnWidths = Array.from(sheet.querySelectorAll('.laundry-register thead tr:first-child th'),
+      await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+      const measuredColumnWidths = Array.from(sheet.querySelectorAll('.laundry-register thead tr:first-child th'),
         (cell) => cell.getBoundingClientRect().width);
-      if (columnWidths.length !== 5 || columnWidths.some((width) => !Number.isFinite(width) || width <= 0)) {
-        throw new Error('The daily register columns could not be measured for PDF export.');
-      }
+      const columnWidths = measuredColumnWidths.length === REGISTER_COLUMN_WIDTHS.length
+        && measuredColumnWidths.every((width) => Number.isFinite(width) && width > 0)
+        ? measuredColumnWidths
+        : REGISTER_COLUMN_WIDTHS;
       const canvas = await window.html2canvas(sheet, {
         scale: 1,
         backgroundColor: '#ffffff',
