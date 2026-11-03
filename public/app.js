@@ -1,4 +1,4 @@
-import { enqueueMutation, readMutationQueue, removeQueuedMutation } from './sync-queue.js';
+import { backupUnsyncedRecords, enqueueMutation, findUnsyncedLocalRecords, readMutationQueue, removeQueuedMutation } from './sync-queue.js';
 import { DEFAULT_SHIFT_ORDER, SHIFT_KEYS, isCompleteShiftOrder, moveShift, normalizeShiftOrder, placeShift } from './shift-order.js';
 import { DEFAULT_MATERIAL_COLORS, applyMaterialColorMutation, isRetiredMaterialColor, normalizeMaterialColors } from './material-colors.js';
 import { buildMonthlyRevenue, formatCents, paginateInvoiceLines } from './billing.js';
@@ -194,7 +194,7 @@ async function hydrateFromServer() {
       state.priceDraft = {};
       state.companyInfo = billing.companyInfo || {};
       state.invoices = invoices.invoices || [];
-      state.notice = '';
+      if (!/saved only on this device/.test(state.notice || '')) state.notice = '';
     } catch {
       state.apiConnected = false;
       clearTimeout(serverReconnectTimer);
@@ -224,6 +224,22 @@ function mergeServerState(db) {
   const queuedColorMutations = queue.filter((mutation) => mutation.type.endsWith('-material-color'));
   const queuedColorRenames = queuedColorMutations.filter((mutation) => mutation.type === 'rename-material-color');
   const localById = new Map(state.records.map((record) => [record.id, normalizeRecord(record)]));
+  // Never discard entries that exist only on this device (e.g. typed offline
+  // and never uploaded): keep a safety copy, re-queue them, and keep them.
+  const unsynced = findUnsyncedLocalRecords({
+    localRecords: [...localById.values()],
+    serverRecords: db.records || [],
+    queuedRecordIds,
+    queuedDeleteIds,
+    locks: db.locks || [],
+  });
+  if (unsynced.length) {
+    backupUnsyncedRecords(unsynced);
+    enqueueMutation({ type: 'save-records', records: unsynced });
+    for (const record of unsynced) queuedRecordIds.add(record.id);
+    state.notice = `${unsynced.length} entr${unsynced.length === 1 ? 'y' : 'ies'} saved only on this device ${unsynced.length === 1 ? 'was' : 'were'} kept and queued for upload.`;
+  }
+  for (const id of tableDraft.keys()) queuedRecordIds.add(id);
   const byId = new Map((db.records || []).map((record) => {
     const normalized = normalizeRecord(record);
     return [normalized.id, normalized];
