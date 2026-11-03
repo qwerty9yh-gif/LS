@@ -1177,7 +1177,11 @@ function pdfExportErrorMessage(error, fallback) {
 async function freshExportRecords() {
   await persistDraft();
   if (navigator.onLine) {
-    const result = await api('api/records');
+    const result = await api('api/records').catch((error) => {
+      throw new Error(error?.status === 503
+        ? 'Could not load the latest records because the server database is temporarily unavailable. Please try again shortly.'
+        : `Could not load the latest records from the server: ${error?.message || 'request failed'}`);
+    });
     if (!Array.isArray(result.records)) throw new Error('The server did not return a valid records list.');
     mergeServerState(result);
     saveLocal();

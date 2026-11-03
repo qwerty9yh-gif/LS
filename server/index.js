@@ -8,6 +8,7 @@ import pg from 'pg';
 import { PrismaClient } from '@prisma/client';
 import { setTimeout as delay } from 'node:timers/promises';
 import { verifyPassword } from './auth.js';
+import { DB_UNAVAILABLE_MESSAGE, isDbConnectionError, withDbRetry } from './db-errors.js';
 import { normalizeShift, formExists as formDateExists, isShiftLocked, isValidFormDate } from './forms.js';
 import { DEFAULT_SHIFT_ORDER, SHIFT_KEYS as ORDERABLE_SHIFT_KEYS, isCompleteShiftOrder, normalizeShiftOrder } from '../shift-order.js';
 import { DEFAULT_MATERIAL_COLORS, MATERIAL_LABELS, isRetiredMaterialColor, normalizeMaterialColors } from '../material-colors.js';
@@ -530,7 +531,7 @@ app.post('/api/auth/login', asyncHandler(async (req, res) => {
 }));
 
 app.get('/api/records', asyncHandler(async (_req, res) => {
-  const db = await readDb();
+  const db = await withDbRetry(() => readDb());
   res.json(db);
 }));
 
@@ -1231,6 +1232,10 @@ app.use((err, _req, res, _next) => {
   console.error('API error:', err?.message || err);
   if (err?.stack) console.error(err.stack);
   if (res.headersSent) return;
+  if (isDbConnectionError(err)) {
+    res.status(503).json({ ok: false, code: 'DB_UNAVAILABLE', error: DB_UNAVAILABLE_MESSAGE });
+    return;
+  }
   res.status(500).json({ ok: false, error: err?.message || 'Server error.' });
 });
 
