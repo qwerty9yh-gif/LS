@@ -1663,6 +1663,17 @@ async function saveUnitPrices(root) {
     render();
   } catch (error) {
     state.notice = `Unit prices were not saved: ${error.message}`;
+    if (error.status === 409) {
+      try {
+        const colors = await api('api/material-colors');
+        if (Array.isArray(colors.materialColors)) {
+          state.materialColors = normalizeMaterialColors(colors.materialColors);
+          saveLocal();
+          render();
+          return;
+        }
+      } catch { /* keep the original notice */ }
+    }
     renderStatusOnly();
   }
 }

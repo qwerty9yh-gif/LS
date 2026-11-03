@@ -11,7 +11,7 @@ import { verifyPassword } from './auth.js';
 import { DB_UNAVAILABLE_MESSAGE, isDbConnectionError, withDbRetry } from './db-errors.js';
 import { normalizeShift, formExists as formDateExists, isShiftLocked, isValidFormDate } from './forms.js';
 import { DEFAULT_SHIFT_ORDER, SHIFT_KEYS as ORDERABLE_SHIFT_KEYS, isCompleteShiftOrder, normalizeShiftOrder } from '../shift-order.js';
-import { DEFAULT_MATERIAL_COLORS, MATERIAL_LABELS, isRetiredMaterialColor, normalizeMaterialColors } from '../material-colors.js';
+import { DEFAULT_MATERIAL_COLORS, MATERIAL_LABELS, isRetiredMaterialColor, normalizeMaterialColors, resolveMaterialColor } from '../material-colors.js';
 import { buildMonthlyRevenue, formatCents, parsePriceCents } from '../billing.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -586,6 +586,35 @@ app.get('/api/billing', asyncHandler(async (_req, res) => {
   });
 }));
 
+// Matches submitted colors to the active catalog case-insensitively (the
+// catalog itself treats "Brown" and "brown" as one color) and rewrites the map
+// to the catalog's canonical labels. Rejects, naming them, any color that is
+// genuinely not in the catalog. Never creates, renames or reactivates colors.
+function canonicalizeSubmitted(submitted, catalog, res) {
+  const resolved = new Map();
+  const missing = [];
+  for (const item of submitted.values()) {
+    const match = resolveMaterialColor(catalog, item.material, item.color);
+    if (!match) {
+      missing.push(`${item.material} / ${item.color}`);
+      continue;
+    }
+    resolved.set(`${match.material}\u0000${match.label}`, { ...item, color: match.label });
+  }
+  if (missing.length) {
+    res.status(409).json({
+      ok: false,
+      code: 'UNIT_PRICE_COLOR_NOT_ACTIVE',
+      error: `These colors are not in the active color list: ${missing.join(', ')}. Reload the colors and try again.`,
+      missing,
+    });
+    return false;
+  }
+  submitted.clear();
+  for (const [key, value] of resolved) submitted.set(key, value);
+  return true;
+}
+
 app.put('/api/unit-prices', asyncHandler(async (req, res) => {
   if (!Array.isArray(req.body?.unitPrices)) {
     res.status(400).json({ ok: false, error: 'Unit prices must be supplied as a list.' });
@@ -608,11 +637,7 @@ app.put('/api/unit-prices', asyncHandler(async (req, res) => {
   if (hasDb()) {
     await ensureSchema();
     const materialColors = await listMaterialColors();
-    const active = new Set(materialColors.map((row) => `${row.material}\u0000${row.label}`));
-    if ([...submitted.keys()].some((key) => !active.has(key))) {
-      res.status(400).json({ ok: false, error: 'A unit price references a color that is no longer active.' });
-      return;
-    }
+    if (!canonicalizeSubmitted(submitted, materialColors, res)) return;
     await prisma.$transaction(async (tx) => {
       for (const item of submitted.values()) {
         await tx.unitPrice.upsert({
@@ -639,10 +664,7 @@ app.put('/api/unit-prices', asyncHandler(async (req, res) => {
 
   const db = await readJsonDb();
   const active = new Set(db.materialColors.map((row) => `${row.material}\u0000${row.label}`));
-  if ([...submitted.keys()].some((key) => !active.has(key))) {
-    res.status(400).json({ ok: false, error: 'A unit price references a color that is no longer active.' });
-    return;
-  }
+  if (!canonicalizeSubmitted(submitted, db.materialColors, res)) return;
   const byKey = new Map(db.unitPrices
     .filter((price) => !active.has(`${price.material}\u0000${price.color}`)
       || submitted.has(`${price.material}\u0000${price.color}`))

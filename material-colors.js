@@ -85,3 +85,9 @@ export function applyMaterialColorMutation(rows, mutation) {
   }
   return current;
 }
+
+export function resolveMaterialColor(rows, material, label) {
+  const wanted = String(label || '').trim().toLocaleLowerCase();
+  return (rows || []).find((row) => row.material === material
+    && String(row.label || '').trim().toLocaleLowerCase() === wanted) || null;
+}

@@ -1,6 +1,6 @@
-import test from 'node:test';
+﻿import test from 'node:test';
 import assert from 'node:assert/strict';
-import { DEFAULT_MATERIAL_COLORS, applyMaterialColorMutation, isRetiredMaterialColor, normalizeMaterialColors } from '../material-colors.js';
+import { DEFAULT_MATERIAL_COLORS, applyMaterialColorMutation, isRetiredMaterialColor, normalizeMaterialColors, resolveMaterialColor } from '../material-colors.js';
 
 test('default color catalog matches the current register categories', () => {
   assert.equal(DEFAULT_MATERIAL_COLORS.length, 13);
@@ -34,3 +34,11 @@ test('queued catalog changes replay over refreshed server state', () => {
   assert.equal(rows.some((row) => row.material === 'Shirts' && row.label === 'White'), false);
   assert.equal(rows.some((row) => row.material === 'Overcoats' && row.label === 'White'), true);
 });
+test('resolveMaterialColor matches case-insensitively to the catalog label', () => {
+  const catalog = [{ material: 'Shirts', label: 'brown' }, { material: 'Shirts', label: 'Blue' }];
+  assert.equal(resolveMaterialColor(catalog, 'Shirts', 'Brown').label, 'brown');
+  assert.equal(resolveMaterialColor(catalog, 'Shirts', ' BLUE ').label, 'Blue');
+  assert.equal(resolveMaterialColor(catalog, 'Trousers', 'Blue'), null);
+  assert.equal(resolveMaterialColor(catalog, 'Shirts', 'Purple'), null);
+});
+
